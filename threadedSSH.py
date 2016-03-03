@@ -1,3 +1,4 @@
+#auteur:k4ndAr3c
 #!/usr/bin/python2
 
 import Queue
