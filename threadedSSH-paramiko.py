@@ -1,4 +1,5 @@
 #!/usr/bin/python2
+#auteur:k4ndAr3c
 
 import Queue
 import time
