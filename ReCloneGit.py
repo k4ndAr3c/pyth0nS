@@ -1,4 +1,6 @@
 #!/usr/bin/python2
+#Auteur:k4ndAr3c
+
 from os import system
 from argparse import ArgumentParser
 import commands
@@ -10,8 +12,14 @@ args = parser.parse_args()
 if args.path:
 	path = args.path
         url = commands.getoutput("cat " +path+ ".git/config | grep url | awk '{print $3}'")
-	system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
+	if "No" in url:
+		print " [-] This is not a git repo"
+	else:
+		system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
 else:
 	url = commands.getoutput("cat .git/config | grep url | awk '{print $3}'")
         path = commands.getoutput("pwd")
-        system("cd .. ; rm -vRf "+path+" && git clone "+str(url))
+	if "No" in url:
+        	print " [-] This is not a git repo"
+	else:
+		system("cd .. ; rm -vRf "+path+" && git clone "+str(url))
