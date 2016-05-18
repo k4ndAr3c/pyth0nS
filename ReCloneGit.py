@@ -9,9 +9,9 @@ args = parser.parse_args()
 
 if args.path:
 	path = args.path
-        url = commands.getoutput("cat " +path+ ".git/config | grep http | awk '{print $3}'")
+        url = commands.getoutput("cat " +path+ ".git/config | grep url | awk '{print $3}'")
 	system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
 else:
-	url = commands.getoutput("cat .git/config | grep http | awk '{print $3}'")
+	url = commands.getoutput("cat .git/config | grep url | awk '{print $3}'")
         path = commands.getoutput("pwd")
         system("cd .. ; rm -vRf "+path+" && git clone "+str(url))
