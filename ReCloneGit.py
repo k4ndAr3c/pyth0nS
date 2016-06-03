@@ -11,13 +11,13 @@ args = parser.parse_args()
 
 if args.path:
 	path = args.path
-        url = commands.getoutput("cat " +path+ ".git/config | grep 'url =' | awk '{print $3}'")
+        url = commands.getoutput("cat " +path+ "/.git/config | grep 'url =' | awk '{print $3}'")
 	if "No" in url:
 		print " [-] This is not a git repo"
 	else:
 		system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
 else:
-	url = commands.getoutput("cat .git/config | grep 'url =' | awk '{print $3}'")
+	url = commands.getoutput("cat .git/config | grep 'url ='| awk '{print $3}'")
         path = commands.getoutput("pwd")
 	if "No" in url:
         	print " [-] This is not a git repo"
