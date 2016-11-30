@@ -1,4 +1,5 @@
 #!/usr/bin/python2
+# -*- coding:Utf-8 -*-
 #Auteur:k4ndAr3c
 
 from os import system
@@ -14,6 +15,8 @@ if args.path:
         url = commands.getoutput("cat " +path+ "/.git/config | grep 'url =' | awk '{print $3}'")
 	if "No" in url:
 		print " [-] This is not a git repo"
+	elif "Aucun" in url:
+		print " [-] Ce n'est pas un dépot git"
 	else:
 		system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
 else:
@@ -21,5 +24,7 @@ else:
         path = commands.getoutput("pwd")
 	if "No" in url:
         	print " [-] This is not a git repo"
+	elif "Aucun" in url:
+		print " [-] Ce n'est pas un dépot git"
 	else:
 		system("cd .. ; rm -vRf "+path+" && git clone "+str(url))
