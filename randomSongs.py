@@ -12,7 +12,6 @@ parser.add_argument('-o', "--outdir", type=str, help='Path to usb')
 parser.add_argument('-n', "--num",  type=int, help='How much songs to copy')
 args = parser.parse_args()
 
-print len(sys.argv)
 if args.indir and args.outdir and args.num:
 	rootPath = args.indir
 	pattern = re.compile(r'.+\.(mp3)$', re.IGNORECASE)
