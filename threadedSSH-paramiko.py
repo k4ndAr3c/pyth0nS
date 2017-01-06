@@ -18,7 +18,7 @@ class WorkerThreads(threading.Thread):
 		ssh.load_host_keys("/root/.ssh/known_hosts")
 		while True:
 			counter = self.queue.get()
-			print "\t.:` %s `:.\n" % counter
+			print "\t.:| %s |:.\n" % counter
 			try:
 				ssh.connect(counter)
 			except paramiko.AuthenticationException:
@@ -35,7 +35,7 @@ class WorkerThreads(threading.Thread):
 l = subprocess.check_output(['arp-scan', '-l']).split('\n')
 CMD = str(sys.argv[1])
 hosts = l[2:-4]
-ips = []
+ips = ['10.42.0.1']
 macs = []
 
 for a in hosts:

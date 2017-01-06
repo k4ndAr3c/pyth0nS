@@ -47,26 +47,26 @@ if Type == "e":
 
 	EncodeBinning = binascii.hexlify(EncodeOrigin)
 
-	HexBits = open('HexBits.txt', 'w')
+	HexBits = open('/tmp/HexBits.txt', 'w')
 	HexBits.write(EncodeBinning)
 	HexBits.close()
 
 # (2) Convert hex to Binary-Bits
-# Takes HexBits.txt as input
+# Takes /tmp/HexBits.txt as input
 ##############################################################################
-	EncodeHalfWay = open('HexBits.txt', 'r').read()
+	EncodeHalfWay = open('/tmp/HexBits.txt', 'r').read()
 
 	EncodeHexed_size = len(EncodeHalfWay)*4
 	EncodeHexed = (bin(int(EncodeHalfWay, 16))[2:]).zfill(EncodeHexed_size)
 
-	BinBits = open('BinBits.txt', 'w')
+	BinBits = open('/tmp/BinBits.txt', 'w')
 	BinBits.write(EncodeHexed)
 	BinBits.close()
 
 # (1) Convert Binary-Bits to ASCII-Steno
-# Takes BinBits.txt as input
+# Takes /tmp/BinBits.txt as input
 ##############################################################################
-	EncodeAllDone = open('BinBits.txt', 'r')
+	EncodeAllDone = open('/tmp/BinBits.txt', 'r')
 
 	while 1:
 		final = open(Ofile, 'a')
@@ -108,25 +108,25 @@ elif Type == 'd':
 	'I':'10', 'J':'10', 'K':'10', 'L':'10', 'T':'10', 'Y':'10', 'M':'11',
 	'N':'11', 'V':'11', 'W':'11', 'X':'11', 'Z':'11'}
 
-	BinBits = open('BinBits.txt', 'w')
+	BinBits = open('/tmp/BinBits.txt', 'w')
 	BinBits.write(convert(DecodeOrigin, Keys))
 	BinBits.close()
 
 # (2) Convert Binary-Bits to hex
-# Takes BinBits.txt as input
+# Takes /tmp/BinBits.txt as input
 ##############################################################################
-	DecodeHalfWay = open('BinBits.txt', 'r').read()
+	DecodeHalfWay = open('/tmp/BinBits.txt', 'r').read()
 
 	DecodeHexed = "%x" % int(DecodeHalfWay, 2)
 
-	HexBits = open('HexBits.txt', 'w')
+	HexBits = open('/tmp/HexBits.txt', 'w')
 	HexBits.write(DecodeHexed)
 	HexBits.close()
 
 # (3) Convert hex to bin
-# Takes HexBits.txt as input
+# Takes /tmp/HexBits.txt as input
 ##############################################################################
-	DecodeAllDone = open('HexBits.txt', 'r').read()
+	DecodeAllDone = open('/tmp/HexBits.txt', 'r').read()
 
 	DecodeBinning = binascii.unhexlify(DecodeAllDone)
 
