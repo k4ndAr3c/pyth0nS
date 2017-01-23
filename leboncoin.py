@@ -25,8 +25,7 @@ def extractDescription(url):
         return "n0ne"
 
 def extract(soup):
-    global annonces
-    co = 0
+    global annonces, co
     for r in soup.findAll('li', attrs={"itemtype":"http://schema.org/Offer"}):
         for i in r.findAll('a'):
             #t = threading.Thread(target=extractDescription, args=(u))
@@ -64,6 +63,7 @@ def extract(soup):
     print "[+]   D0ne:."
     return 0
 
+co = 0
 tLock = threading.Lock()
 mech = Browser()
 mech.set_handle_robots(False)
@@ -75,7 +75,6 @@ annonces['lieu'] = []
 annonces['date'] = []
 annonces['des'] = []
 annonces['url'] = []
-
 parser = ArgumentParser(prog='leboncoin.py')
 parser.add_argument('-d', "--departement", type=str, help='Département désiré (sans accent)', default="aveyron")
 parser.add_argument('-p', "--prixmax", type=int, help='Prix max désiré', default=500)
