@@ -75,18 +75,20 @@ annonces['lieu'] = []
 annonces['date'] = []
 annonces['des'] = []
 annonces['url'] = []
-parser = ArgumentParser(prog='leboncoin.py')
+parser = ArgumentParser(prog=sys.argv[0])
 parser.add_argument('-d', "--departement", type=str, help='Département désiré (sans accent)', default="aveyron")
-parser.add_argument('-p', "--prixmax", type=int, help='Prix max désiré', default=500)
-parser.add_argument('-n', "--num",  type=int, help='Nombre de pages à scraper', default=1)
+parser.add_argument('-r', "--region", type=str, help='Région désirée (sans accent)', default="midi_pyrenees")
+parser.add_argument('-p', "--prixmax", type=int, help='Prix max désiré', default=300)
+parser.add_argument('-n', "--num",  type=int, help='Nombre de pages à visiter', default=1)
 parser.add_argument('-t', "--type",  type=str, help='(v)oiture ou (l)ocation', default='v')
 args = parser.parse_args()
 dept = args.departement.replace("-","_").lower()
-urllocation = "https://www.leboncoin.fr/locations/offres/midi_pyrenees/"+dept+"/?th=1&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
-urlvoiture = "https://www.leboncoin.fr/voitures/offres/midi_pyrenees/"+dept+"/?th=1&parrot=0&pe=5&fu=2"
+region = args.region.replace("-","_").lower()
+urllocation = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?th=1&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
+urlvoiture = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?th=1&parrot=0&pe=5&fu=2"
 pageCount = 2
-urllocation2 = "https://www.leboncoin.fr/locations/offres/midi_pyrenees/"+dept+"/?o="+str(pageCount)+"&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
-urlvoiture2 = "https://www.leboncoin.fr/voitures/offres/midi_pyrenees/"+dept+"/?o="+str(pageCount)+"&parrot=0&pe=5&fu=2"
+urllocation2 = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
+urlvoiture2 = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&parrot=0&pe=5&fu=2"
 
 if args.type == 'v':
     url = urlvoiture
