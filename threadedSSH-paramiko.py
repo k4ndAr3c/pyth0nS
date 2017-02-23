@@ -18,10 +18,10 @@ class WorkerThreads(threading.Thread):
 		ssh.load_host_keys("/root/.ssh/known_hosts")
 		while True:
 			counter = self.queue.get()
-			print "\t.:| %s |:.\n" % counter
+			print "\t.:| %s |:." % counter
 			try:
 				ssh.connect(counter)
-			except paramiko.AuthenticationException:
+			except:
 				print '[-] Failed to connect with %s\n' % counter
 			else:
 				stdin, stdout, stderr = ssh.exec_command(CMD)

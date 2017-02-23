@@ -1,5 +1,5 @@
+#!/usr/bin/env python2
 # -*- coding:Utf-8 -*-
-#!/usr/bin/env python2.7
 
 from mechanize import Browser
 from BeautifulSoup import BeautifulSoup
