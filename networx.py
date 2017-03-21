@@ -1,6 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 import time, psutil
-
 def main():
     old_value1 = 0    
     old_value2 = 0    
@@ -15,10 +14,8 @@ def main():
 
 def convert_to_gbit(value):
     return value/1024./1024./1024.*8
-
 #def send_stat(value):
 #    print("%0.3f" % convert_to_gbit(value))
 def send_stat(value, v):
     print('<Recv: \033[31m{}\033[0m Kb/s><Sent: \033[32m{}\033[0m Kb/s>'.format(v/1024, value/1024))
-
 main()

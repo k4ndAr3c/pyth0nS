@@ -1,5 +1,5 @@
 #!/usr/bin/env python2
-import sys
+import sys, os
 from argparse import ArgumentParser
 
 def xor(s1, s2):
@@ -33,5 +33,6 @@ if args.file and args.key:
 		f.write(dec_data)
 		f.close()
 	print "There is sometimes one junk ligne in xored.out"
+	print os.system('cat xored.out')
 else:
 	print "[-] Missing filename or key .."
