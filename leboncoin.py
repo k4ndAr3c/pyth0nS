@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 # encoding: utf-8
-import sys, threading
+import sys, threading, re
 from mechanize import Browser
 from argparse import ArgumentParser
 from bs4 import BeautifulSoup
@@ -16,10 +16,10 @@ def extractDescription(url):
     try:
         html = mech.open(url).read()
         soup = BeautifulSoup(html, 'lxml')
-        for div in soup.findAll('div', attrs={"class":"line properties_description"}):
-            des = div.find('p', attrs={"itemprop":"description"})
+        for div in soup.findAll('meta', attrs={"property":"og:description"}):
+            des = re.findall('.*?content="(.*.)" data-react-helmet.*?', str(div))[0]
         #tLock.release()
-        return '.'.join(des.strings)
+        return des
     except Exception, e:
         print e
         return "n0ne"
@@ -84,11 +84,11 @@ parser.add_argument('-t', "--type",  type=str, help='(v)oiture ou (l)ocation', d
 args = parser.parse_args()
 dept = args.departement.replace("-","_").lower()
 region = args.region.replace("-","_").lower()
-urllocation = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?th=1&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
-urlvoiture = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?th=1&parrot=0&pe=5&fu=2"
+urllocation = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?th=1&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
+urlvoiture = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?th=1&pe=5&fu=2"
 pageCount = 2
-urllocation2 = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&parrot=0&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
-urlvoiture2 = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&parrot=0&pe=5&fu=2"
+urllocation2 = "https://www.leboncoin.fr/locations/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&mre="+str(args.prixmax)+"&ret=1&ret=2&ret=3&ret=5"
+urlvoiture2 = "https://www.leboncoin.fr/voitures/offres/"+region+"/"+dept+"/?o="+str(pageCount)+"&pe=5&fu=2"
 
 if args.type == 'v':
     url = urlvoiture

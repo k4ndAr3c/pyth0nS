@@ -13,10 +13,11 @@ def create_connection(address, timeout=None, source_address=None):
 def getaddrinfo(*args):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (args[0], args[1]))]
 
-socket.getaddrinfo = getaddrinfo
-socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,"10.42.0.1",9100,True)
-socket.socket = socks.socksocket
-socket.create_connection = create_connection
+if sys.argv[1] == "tor":
+    socket.getaddrinfo = getaddrinfo
+    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5,"10.42.0.1",9100,True)
+    socket.socket = socks.socksocket
+    socket.create_connection = create_connection
 
 url = 'https://tinyurl.com/create.php'
 r1 = ".*?<div class=\"indent\"><b>(.*?)</b><div id=\"success\">.*?"
