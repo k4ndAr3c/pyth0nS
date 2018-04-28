@@ -14,17 +14,19 @@ if args.path:
 	path = args.path
         url = commands.getoutput("cat " +path+ "/.git/config | grep 'url =' | awk '{print $3}'")
 	if "No" in url:
-		print " [-] This is not a git repo"
+		print(" [-] This is not a git repo")
 	elif "Aucun" in url:
-		print " [-] Ce n'est pas un dépot git"
+		print(" [-] Ce n'est pas un dépot git")
 	else:
+                print("[+] Cloning {} => {}".format(url, path))
 		system("rm -vRf "+path+" && git clone "+str(url)+" "+path)
 else:
 	url = commands.getoutput("cat .git/config | grep 'url ='| awk '{print $3}'")
         path = commands.getoutput("pwd")
 	if "No" in url:
-        	print " [-] This is not a git repo"
+        	print(" [-] This is not a git repo")
 	elif "Aucun" in url:
-		print " [-] Ce n'est pas un dépot git"
+		print(" [-] Ce n'est pas un dépot git")
 	else:
+                print("[+] Cloning {} => {}".format(url, path))
 		system("cd .. ; rm -vRf "+path+" && git clone "+str(url))

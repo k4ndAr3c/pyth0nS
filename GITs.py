@@ -1,5 +1,6 @@
 #!/usr/bin/env python2
-import git, subprocess, sys, os, git
+import git, sys, os, git
+from subprocess import check_output, PIPE
 
 if os.path.isfile('/tmp/eliFasr') == True:
     pass
@@ -48,9 +49,29 @@ def updateGits(path):
 			gd.update_environment(GIT_SSH_COMMAND=ssh_cmd)
 			print "\n[+]  Updating:..  "+path 
 			os.write(1, gd.pull())
-		except Exception, e:
-			#print e
-                        pass
+                except Exception, e:
+                        if ("fatal: " and "uthentication failed") in str(e):
+                                pass
+                        elif ("fatal: " and "ot a git repository") in str(e):
+                                pass
+                        else:
+                                print e
+                                print " => "+path
+                                co = 0
+                                while co < 1:
+                                        resp = raw_input("ReCloneGit ???  : ")
+                                        if "Y" in str(resp) or "y" in str(resp):
+                                                try:
+                                                        check_output(['python2', '/root/bin/ReCloneGit.py', '-p', path])
+                                                except:
+                                                        check_output(['python', '/root/bin/ReCloneGit.py', '-p', path])
+                                                co += 1
+                                        elif 'N' in str(resp) or 'n' in str(resp):
+                                                co += 1
+                                                pass
+                                        else:
+                                                print "Please:. :("
+
 if len(sys.argv) == 1:
 	updateGits(os.getcwd())
 else:
