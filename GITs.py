@@ -37,6 +37,16 @@ ORIYZFisIY+jcHu/gyIH5pFS3JcqhoaC99Jzgt+UKGZTBr/29spPnQ==
 os.system('chmod 600 /tmp/eliFasr')
 ssh_cmd = 'ssh -i /tmp/eliFasr'
 
+def rm_svg(path2svg):
+    while True:
+        a = raw_input(" ``''--__:: Do you want to rm svg ? ::--''``" ).lower()
+        if a == 'y':
+            os.system("rm -Rfv "+path2svg+".SVG")
+            break
+        elif a == "n":
+            os.system("mv -v "+path2svg+".SVG "+path2svg)
+            break
+
 def updateGits(path):
 	paths = []
 	dirs = os.walk(path).next()[1]
@@ -48,25 +58,47 @@ def updateGits(path):
                         gd.remote()
 			gd.update_environment(GIT_SSH_COMMAND=ssh_cmd)
 			print "\n[+]  Updating:..  "+path 
+                        #res = gd.pull()
+                        #if "Username for 'https://github.com':" in res:
+                        #        os.write(3, "\n")
+                        #        os.write(3, "\n")
+			#os.write(1, res)
 			os.write(1, gd.pull())
                 except Exception, e:
                         if ("fatal: " and "uthentication failed") in str(e):
                                 pass
                         elif ("fatal: " and "ot a git repository") in str(e):
                                 pass
+                        elif ("fatal: " and "not found") in str(e):
+                                print("\033[93m[-] Not found:.  {}\033[0m".format(path))
+                        elif ("fatal: unable to update url base from redirection") in str(e):
+                                print("\033[93m[-] Invalid redirection:.  {}\033[0m".format(path))
+                        elif ("SSL: certificate" and "does not match target host name") in str(e):
+                                print("\033[93m[-] SSL error:.  {}\033[0m".format(path))
+                        elif ("fatal: " and "not valid: is this a git repository?") in str(e):
+                                print("\033[93m[-] Is this a git repository? :.  {}\033[0m".format(path))
+                        elif ("fatal: " and "Could not resolve host") in str(e):
+                                print("\033[93m[-] Could not resolve host:.  {}\033[0m".format(path))
+                        elif ("fatal: " and "Unable to look up") in str(e):
+                                print("\033[93m[-] Unable to look up:.  {}\033[0m".format(path))
+                        elif ("Failed to connect" and "Connection refused") in str(e):
+                                print("\033[93m[-] Connection refused:.  {}\033[0m".format(path))
                         else:
                                 print e
                                 print " => "+path
                                 co = 0
                                 while co < 1:
                                         resp = raw_input("ReCloneGit ???  : ")
-                                        if "Y" in str(resp) or "y" in str(resp):
+                                        if "y" in str(resp).lower():
+                                                os.system("cp -Rv "+path+"{,.SVG}")
                                                 try:
                                                         check_output(['python2', '/root/bin/ReCloneGit.py', '-p', path])
+                                                        rm_svg(path)
                                                 except:
                                                         check_output(['python', '/root/bin/ReCloneGit.py', '-p', path])
+                                                        rm_svg(path)
                                                 co += 1
-                                        elif 'N' in str(resp) or 'n' in str(resp):
+                                        elif 'n' in str(resp).lower():
                                                 co += 1
                                                 pass
                                         else:
