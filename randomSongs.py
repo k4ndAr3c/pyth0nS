@@ -1,5 +1,5 @@
-# -*- coding:Utf-8 -*-
-#!/usr/bin/env python2
+#!/usr/bin/env python3
+#coding: utf-8
 #auteur:K4ndAr3c
 
 import fnmatch, shutil
@@ -13,23 +13,23 @@ parser.add_argument('-n', "--num",  type=int, help='How much songs to copy')
 args = parser.parse_args()
 
 if args.indir and args.outdir and args.num:
-	rootPath = args.indir
-	pattern = re.compile(r'.+\.(mp3)$', re.IGNORECASE)
-	i=1   
-	l=[]
+    rootPath = args.indir
+    pattern = re.compile(r'.+\.(mp3)$', re.IGNORECASE)
+    i=1   
+    l=[]
 
-	for root, dirs, files in os.walk(rootPath):
-		l.extend(os.path.join(root, name) for name in files if pattern.match(name))
-		#for filename in fnmatch.filter(files, pattern):
-			#l.append(os.path.join(root, filename))
-
-	lo = len(l)
+    for root, dirs, files in os.walk(rootPath):
+        l.extend(os.path.join(root, name) for name in files if pattern.match(name))
+    lo = len(l)
 		
-	while i<args.num:														
-		b = random.randint(1, lo)	
-		shutil.copy2(l[b],args.outdir)
-	        print "%i> %s" % (i, l[b])
-		i=i+1	
+    while i<args.num:											
+        b = random.randint(1, lo)	
+        try:
+            print("{}> {}".format(i, l[b]))
+            shutil.copy2(l[b],args.outdir)
+        except Exception as e:
+            print('\033[91m'+str(e)+'\033[0m')
+        i=i+1	
 else:
-	parser.print_help()
+    parser.print_help()
 

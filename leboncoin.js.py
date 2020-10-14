@@ -1,6 +1,6 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 #coding: utf-8
-import os, re, sys
+import os, re, sys, random
 from argparse import ArgumentParser
 
 WARNING = '\033[93m'
@@ -13,16 +13,20 @@ BOLD = '\033[1m'
 #departement = "12"
 
 js_file = "/tmp/leBonCoin.js"
-res_file = "/tmp/lbc_results"
+res_file = "/tmp/lbc_results."+str(random.randint(0,10000))
 
 parser = ArgumentParser(prog=sys.argv[0])
 parser.add_argument('-d', "--departement", type=str, help='Département désiré en chiffre', default="12")
 parser.add_argument('-r', "--region", type=str, help='Région désirée en chiffre', default="16")
-parser.add_argument('-p', "--prixmax", type=str, help='Prix max désiré', default="300")
+parser.add_argument('-p', "--prixmax", type=str, help='Prix max désiré', default="321")
 parser.add_argument('-n', "--nbpage",  type=str, help='Page à visiter', default="1")
 parser.add_argument('-q', "--query",  type=str, help='Mot de recherche', default="")
 parser.add_argument('-t', "--type",  type=str, help='Type de recherche (ventes_immobilieres, *locations*, ...)', default="locations")
 args = parser.parse_args()
+
+if os.path.exists("/usr/bin/node"): node = "/usr/bin/node"
+else: node = "/usr/bin/nodejs"
+os.system('ln -s $HOME/node_modules/ /tmp/')
 
 def main():
     with open(js_file, 'w') as f:
@@ -35,7 +39,7 @@ var search = new leboncoin.Search()
     .setRegion("'''+args.region+'''")
     .setDepartment("'''+args.departement+'''")
     .addSearchExtra("price", {min: 0, max: '''+args.prixmax+'''}) // will add a range of price
-    .addSearchExtra("furnished", ["1", "Non meublé"]); // will add enums for Meublé and Non meublé
+    //.addSearchExtra("furnished", ["1", "Non meublé"]); // will add enums for Meublé and Non meublé
  
 search.run().then(function (data) {
     console.log(data.page); // the current page
@@ -53,7 +57,7 @@ search.run().then(function (data) {
     console.error(err);
 });''')
     
-    #os.system('nodejs {} > {}'.format(js_file, res_file))
+    os.system('{} {} > {}'.format(node, js_file, res_file))
 
 def parse(f1le):
     with open(f1le, 'r') as f:
@@ -63,7 +67,7 @@ def parse(f1le):
     annonces = {}
     with open(f1le, 'r') as f:
         co = 0
-        page = f.read().split('###########################################################\n')
+        page = f.read().split('###########################################################\n')[:-1]
         for a in page:
             annonces[co] = {}
             try:
@@ -71,9 +75,12 @@ def parse(f1le):
             except Exception as e:
                 annonces[co]['titre'] = 'nil'
             try:
-                annonces[co]['des'] = re.findall(".*?description: '(.*.)',\n.*?", a)[0].replace('\\n', ' ')
+                annonces[co]['des'] = re.findall(".*?description: (.*?),\n  category.*?", a)[0].replace('\n', ' ').replace('\\n', ' ').replace("  ", " ")
             except Exception as e:
-                annonces[co]['des'] = 'nil'
+                try:
+                    annonces[co]['des'] = re.findall(""".*?description: (.*?),   category.*?""", re.sub("\n", " ", a))[0].replace('\n', ' ').replace("\\n' +     '", " ").replace("\\n\" +     '", " ").replace('\\n" +     "', " ").replace("\\n' +     \"", " ").replace('\\n', ' ').replace("  ", " ")
+                except Exception as e:
+                    annonces[co]['des'] = 'nil'
             try:
                 annonces[co]['lieu'] = re.findall(".*?city_label: '(.*.)',\n.*?", a)[0]
             except Exception as e:
@@ -104,13 +111,13 @@ def parse(f1le):
                     elif v == 'lieu' or v == 'titre':
                         print(WARNING+"\t"+annonces[co][v]+ENDC)
                     elif v == 'des':
-                        print(BOLD+annonces[co][v]+ENDC)
+                        print('\t'+BOLD+annonces[co][v]+ENDC)
                     elif v == 'date':
                         print('\t'+annonces[co][v])
                     else:
-                        print annonces[co][v]
+                        print('\t'+annonces[co][v])
             except Exception as e:
-                print e
+                print(e)
             co += 1
 
 main()
