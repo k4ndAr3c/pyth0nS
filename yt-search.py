@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from youtubesearchpython import *
-import sys, json
+import sys, json, os
 COLOR_CODES = {
     'black':    '0;30',     'bright grey':  '0;37',
     'blue':     '0;34',     'white':        '1;37',
@@ -29,16 +29,18 @@ videosSearch = VideosSearch(sys.argv[1], limit=maxi)
 lc = json.loads(json.dumps(customSearch.result()))
 lv = json.loads(json.dumps(videosSearch.result()))
 d = {}
+co = 0
 #for r in lv["result"]:
 #    print(r)
 
 def fill_d(l):
-    global d
+    global d, co
     for _ in range(len(l["result"])):
         title = l["result"][_]["title"]
         if title in d.keys(): pass
         else:
             d[title] = {}
+            d[title]["num"] = str(co); co += 1
             try: d[title]["time"] = l["result"][_]["publishedTime"]
             except: d[title]["time"] = "unk title"
             try: d[title]["desc"] = l["result"][_]["descriptionSnippet"][0]["text"]
@@ -50,16 +52,30 @@ def fill_d(l):
             try: d[title]["access"] = l["result"][_]["accessibility"]["title"]
             except: d[title]["access"] = "unk access"
 
-write_color(" ------- w3lc0m3 fR1en|} ----------\n\n", "bright blue")
+write_color("\n ------- w3lc0m3 fR1en|} ----------\n", "bright blue")
 
 fill_d(lc); fill_d(lv)
 
 for _ in d:
-    write_color("-> " + d[_]["chan"], "green", False)
+    write_color("{} -> {}".format(d[_]["num"], d[_]["chan"]), "green", False)
     write_color("-> " + _, "yellow", False)
     write_color("-> " + d[_]["time"], "dark grey")
     write_color("     " + d[_]["access"], "white")
     write_color("     " + d[_]["url"], "red")
     write_color("     " + d[_]["desc"], "cyan")
     print()
+
+res = input("Do you want to download a vidz ? ")
+if res.isdigit():
+    for t in d:
+        if res == d[t]["num"]:
+            print(d[t]["url"])
+            d1r = input('Where ? ')
+            if "/" in d1r:
+                os.system("cd {} && yt-dlp -f 18 {}".format(d1r, d[t]["url"]))
+            else:
+                os.system("yt-dlp -f 18 {}".format(d[t]["url"]))
+
+
+
 
