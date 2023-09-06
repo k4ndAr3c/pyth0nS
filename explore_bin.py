@@ -58,7 +58,10 @@ def fun_64(f, uhex=False):
     data_ref2 = (0x602000, 0x603000)
 
     for i in xrange(0, len(data), 8):
-        dwords.append(rq(data[i:i+8]))
+        try:
+            dwords.append(rq(data[i:i+8]))
+        except:
+            pass
 
     for i, d in enumerate(dwords):
         desc = ""

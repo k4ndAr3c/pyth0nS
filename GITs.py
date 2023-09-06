@@ -6,8 +6,9 @@ if os.path.isfile('/tmp/eliFasr') == True:
     pass
 else:
     rsaFile = open('/tmp/eliFasr', "w")
-    rsaFile.write("""-----BEGIN RSA PRIVATE KEY-----
------END RSA PRIVATE KEY-----""")
+    rsaFile.write("""-----BEGIN OPENSSH PRIVATE KEY-----
+-----END OPENSSH PRIVATE KEY-----
+""")
     rsaFile.close()
 os.system('chmod 600 /tmp/eliFasr')
 ssh_cmd = 'ssh -i /tmp/eliFasr'
@@ -97,5 +98,5 @@ def updateGits(path):
 if len(sys.argv) == 1:
 	updateGits(os.getcwd())
 else:
-	for c in range(1, len(sys.argv)):
+	for c in range(1, len(sys.argv)):    
 		updateGits(sys.argv[c])

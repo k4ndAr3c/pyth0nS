@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-import time, psutil, os
+import time, psutil, os, curses
 t = 1
+
+def check(stdscr):
+    stdscr.nodelay(True)  # do not wait for input when calling getch
+    c = stdscr.getch()
+    if c != -1:
+        return chr(c)
 
 def main():
     global t, total1, total2
@@ -9,9 +15,12 @@ def main():
     old_value2 = 0    
     c = 0
     while True:
-        if c > 28:
-            os.system('clear')
-            c = 0
+        #if c > 28:
+        #    os.system('clear')
+        #    c = 0
+        mc = curses.wrapper(check)
+        if mc == "q":
+            exit()
         new_value1 = psutil.net_io_counters().bytes_sent
         new_value2 = psutil.net_io_counters().bytes_recv
         if old_value1 and old_value2:

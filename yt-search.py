@@ -65,16 +65,18 @@ for _ in d:
     write_color("     " + d[_]["desc"], "cyan")
     print()
 
-res = input("Do you want to download a vidz ? ")
-if res.isdigit():
-    for t in d:
-        if res == d[t]["num"]:
-            print(d[t]["url"])
-            d1r = input('Where ? ')
-            if "/" in d1r:
-                os.system("cd {} && yt-dlp -f 18 {}".format(d1r, d[t]["url"]))
-            else:
-                os.system("yt-dlp -f 18 {}".format(d[t]["url"]))
+while True:
+    res = input("Do you want to download a vidz ? ")
+    if res.isdigit():
+        for t in d:
+            if res == d[t]["num"]:
+                print(d[t]["url"])
+                d1r = input('Where ? ')
+                if "/" in d1r:
+                    os.system("cd {} && yt-dlp -f 18 {}".format(d1r, d[t]["url"]))
+                else:
+                    os.system("yt-dlp -f 18 {}".format(d[t]["url"]))
+    else: exit(1)
 
 
 

@@ -1,28 +1,27 @@
-#!/usr/bin/python2
-#encoding: utf-8
+#!/usr/bin/env python3
 import os, sys, re
 from subprocess import check_output
 
 def info(x):
     global dicvm
     warning = False
-    vms = check_output(['vboxmanage', 'list', x]).split('\n')
+    vms = check_output(['vboxmanage', 'list', x]).split(b'\n')
     dicvm = {}
     co = 0
     for vm in vms[:-1]:
-        if "WARNING" in vm.upper():
+        if b"WARNING" in vm.upper():
             warning = True
             print("[!]   WARNING! kernel module is not loaded")
-        elif re.findall('........-....-....-....-............', vm):
+        elif re.findall(b'........-....-....-....-............', vm):
             dicvm[co] = []
-            name = vm.split(" {")[0]
-            ID = vm.split(' {')[1].replace('}', '')
+            name = vm.split(b" {")[0].decode()
+            ID = vm.split(b' {')[1].replace(b'}', b'').decode().strip()
             dicvm[co].append(ID)
             dicvm[co].append(name)
             co += 1
     if warning:
         a = False
-        r = raw_input('| Do you want to start services ? : ').lower()
+        r = input('| Do you want to start services ? : ').lower()
         while not a:
             if r == 'y' or r == 'yes':
                 svc("start")
@@ -45,9 +44,9 @@ def show():
         print("{} : {} : {}".format(i, dicvm[i][1], dicvm[i][0]))
 
 def choice():
-    resp = raw_input("| Choose one :) : ")
+    resp = input("| Choose one :) : ")
     while int(resp) not in dicvm:
-        resp = raw_input("| Choose one :) = ")
+        resp = input("| Choose one :) = ")
     return resp
 
 def start(ID, b):
@@ -90,7 +89,7 @@ if len(sys.argv) == 3:
         if sys.argv[2] == dicvm[i][0]:
             present = True
             if sys.argv[1].lower() == "start":
-                head = raw_input("| Start headless ? : ")
+                head = input("| Start headless ? : ")
                 if head.lower() != "n":
                     start(sys.argv[2], True)
                 else:
@@ -119,7 +118,7 @@ elif len(sys.argv) == 2:
         if c == str(i):
             present = True
             if sys.argv[1].lower() == "start":
-                head = raw_input("| Start headless ? : ")
+                head = input("| Start headless ? : ")
                 if head.lower() != "n":
                     start(dicvm[int(c)][0], True)
                 else:

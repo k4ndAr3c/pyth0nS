@@ -11,7 +11,6 @@ def traduc(texte, source="auto", dest="auto"):
     link = "http://translate.google.com/m?hl=%s&sl=%s&q=%s" % (dest, source, texte.replace(" ", "+"))
     r = requests.get(link, headers=agents)
     page = r.text
-    
     #print(page)
     avant_traduc = 'class="result-container">'
     result = page[page.find(avant_traduc)+len(avant_traduc):]
@@ -34,8 +33,8 @@ def gen_s():
 def retr_phrase(nb):
     url = "http://enneagon.org/phrases"
     r = requests.post(url, data={"nb":nb, "submit":"Lancer !"})
-    p = re.findall('.*?class="main">\n<p>\n(.*?)\n</p>\n</div>.*?', r.text, re.DOTALL)[0]
-    return ' '.join(p.split(" ")[-21:])
+    p = re.findall('.*?id="mainp">\n        <p id="phr">\n(.*?)\n        </p>\n    </div>\n.*?', r.text, re.DOTALL)[0]
+    return p.rstrip().strip()
     
 txt = ""
 print("GO!!!")
@@ -43,13 +42,13 @@ try:
     sz1 = os.path.getsize('results')
 except: sz1 = 0
 
-with open('results', 'a') as f:
-    f.write('\n')
-    for _ in range(5):
+for _ in range(5):
+    with open('results', 'a') as f:
+        f.write('\n')
         if random.randint(0, 1000) % 2 == 0:
             a = gen_s()
         else:
-            a = retr_phrase(1)
+            a = retr_phrase(2)
         
         a = a.replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
         txt += a + " "
@@ -78,3 +77,7 @@ try:
     e.runAndWait()
 except Exception as e:
     print(e)
+
+
+
+
