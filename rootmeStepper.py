@@ -5,10 +5,12 @@ from bs4 import BeautifulSoup
 from time import sleep
 import argparse
 import requests
+from random import choice
 from colorama import init as colorama_init, Fore, Style
 
 CATEGORIES = ['Steganography', 'Cryptanalysis', 'Forensic', 'Programming', 'Cracking', 'Realist', 'Web-Server', 'App-System', 'App-Script', 'Web-Client', 'Network']
 HEAD = {'User-Agent':'Firefox 170'}
+COLORS = [Fore.RED, Fore.GREEN, Fore.YELLOW, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.WHITE]
 
 def get_page(pseudo):
     r = requests.get(f"https://www.root-me.org/{pseudo}?inc=score&lang=en", headers=HEAD)
@@ -218,11 +220,15 @@ def main():
     i = 0
     todos = reversed(sorted(todos, key=lambda x: x[1]))
     with open('/tmp/todo_challs.txt', 'w') as f:
+        r1 = choice(COLORS)
+        r2 = choice(COLORS)
+        r3 = choice(COLORS)
+        r4 = choice(COLORS)
         for t in todos:
             if i > MAX: 
                 print()
                 exit(0)
-            s = f"{Fore.GREEN}[+]{Style.RESET_ALL} [{t[0][0]:<15}> {Fore.GREEN} {t[0][1]:<40}  {Fore.YELLOW}{t[0][2]} pts{Style.RESET_ALL} => {Fore.RED}{t[1]} vals{Style.RESET_ALL}"
+            s = f"{r1}[+]{Style.RESET_ALL} [{t[0][0]:<15}> {r2} {t[0][1]:<40}  {r3}{t[0][2]} pts{Style.RESET_ALL} => {r4}{t[1]} vals{Style.RESET_ALL}"
             print(s)
             f.write(s+"\n")
             i += 1
