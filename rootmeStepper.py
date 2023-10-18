@@ -12,6 +12,13 @@ CATEGORIES = ['Steganography', 'Cryptanalysis', 'Forensic', 'Programming', 'Crac
 HEAD = {'User-Agent':'Firefox 170'}
 COLORS = [Fore.RED, Fore.GREEN, Fore.YELLOW, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.WHITE]
 
+try:
+    PREMIUMS = open('/root/bin/premiums_challs', 'r').read().split('\n')[:-1]
+    #print(PREMIUMS)
+except Exception as e:
+    PREMIUMS = False
+    print(e)
+
 def get_page(pseudo):
     r = requests.get(f"https://www.root-me.org/{pseudo}?inc=score&lang=en", headers=HEAD)
     if r.status_code == 200:
@@ -91,10 +98,10 @@ def display_results(username, points, goal, combinations):
         if i >= 250: 
             print()
             exit(0)
-        print(f"{Fore.GREEN}[+]{Style.RESET_ALL} {i+1}")
+        print(f"{Fore.GREEN}[+]{Style.RESET_ALL} {i+1}", end="")
         for challenge in combination:
             c, n, p = challenge
-            print(f"\t{Fore.BLUE}[*]{Style.RESET_ALL} {p}\t: [{c}] {n}")
+            print(f"\t{Fore.BLUE:<10}[*]{Style.RESET_ALL} {p}\t: [{c}] {n}")
         print()
 
 def parse_args():
@@ -106,12 +113,13 @@ def parse_args():
     parser.add_argument('-s', '--sec', type=int, default=2, help='The number of seconds to sleep between requests')
     parser.add_argument('-N', '--next', help='Get score of next player', action="store_true")
     parser.add_argument('-L', '--light', help='Just print todos challs sorted by pts', action="store_true")
+    parser.add_argument('-P', '--premium', help='Is the player a premium', action="store_true")
 
     category_group = parser.add_mutually_exclusive_group(required=False)
     category_group.add_argument('-a', '--add-categories', type=str, metavar='', default=None, help='The categories to include, separated by commas. Default is all categories')
     category_group.add_argument('-e', '--exclude-categories', type=str, metavar='',default=None, help='The categories to exclude, separated by commas. Default is all categories')
     args = parser.parse_args()
-    return args.username, args.goal, args.depth, args.max, args.sec, args.next, args.light, parse_categories(args.add_categories), parse_categories(args.exclude_categories)
+    return args.username, args.goal, args.depth, args.max, args.sec, args.next, args.light, args.premium, parse_categories(args.add_categories), parse_categories(args.exclude_categories)
 
 def get_validations(cat):
     r = requests.get(f"https://www.root-me.org/en/Challenges/{cat}/", headers=HEAD)
@@ -161,11 +169,21 @@ def get_next(pseudo):
 def main():
     colorama_init()
     #display_welcome()
-    username, goal, depth, MAX, SEC, N, L, add_categories, exclude_categories = parse_args()
+    username, goal, depth, MAX, SEC, N, L, P, add_categories, exclude_categories = parse_args()
     page = get_page(username)
     challenges = get_challenges(page)
     points = get_points(page)
     challenges = filter_by_categories(challenges, add_categories, exclude_categories)
+    
+    if not P:
+        for _ in range(len(challenges)):
+            for __ in range(len(PREMIUMS)):
+                try:
+                    if challenges[_][1] in PREMIUMS[__]:
+                        challenges.remove(challenges[_])
+                except Exception as e:
+                    #print(e)
+                    pass
 
     if N:
         n3xt = get_next(username)
