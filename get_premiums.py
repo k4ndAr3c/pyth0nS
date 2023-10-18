@@ -13,7 +13,7 @@ parser.add_argument('-s', "--spip", type=str, help='spip_session cookie')
 args = parser.parse_args()
 
 spip_session = args.spip
-cook = {'spip_session':spip_session, 'spip_admin':"%40kandashaka%40gmail.com"}
+cook = {'spip_session':spip_session}
 user_agent = "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0"
 head = {"User-Agent":user_agent}
 base_url = "https://www.root-me.org/"
