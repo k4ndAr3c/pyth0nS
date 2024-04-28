@@ -1,137 +1,158 @@
 #!/usr/bin/env python3
-import os, sys, re
+import os, re, copy
+from sys import argv
 from subprocess import check_output
+from argparse import ArgumentParser
 
-def info(x):
-    global dicvm
-    warning = False
-    vms = check_output(['vboxmanage', 'list', x]).split(b'\n')
-    dicvm = {}
-    co = 0
-    for vm in vms[:-1]:
-        if b"WARNING" in vm.upper():
-            warning = True
-            print("[!]   WARNING! kernel module is not loaded")
-        elif re.findall(b'........-....-....-....-............', vm):
-            dicvm[co] = []
-            name = vm.split(b" {")[0].decode()
-            ID = vm.split(b' {')[1].replace(b'}', b'').decode().strip()
-            dicvm[co].append(ID)
-            dicvm[co].append(name)
-            co += 1
-    if warning:
-        a = False
-        r = input('| Do you want to start services ? : ').lower()
-        while not a:
-            if r == 'y' or r == 'yes':
-                svc("start")
-                a = True
-            elif r == 'n' or r == 'no':
-                a = True
-                show()
-                exit(0)
-            else:
-                r = raw_input('| Do you want to start services ? = ').lower()
+actions = {
+    'start':'start',
+    'pause':'pause',
+    'resume':'resume',
+    'stop':'acpipowerbutton',
+    'fstop':'poweroff',
+    'reset':'reset',
+    'save':'savestate',
+    'svc0':"stop",
+    'svc1':"start",
+    'list':False,
+    'listrun':True
+    }
 
-def svc(x):
-    os.system('sudo systemctl {} vboxautostart-service.service vboxballoonctrl-service.service vboxdrv.service vboxweb-service.service'.format(x))
+class VMman(str):
+    def __init__(self, n=-1):
+        self.dicvm = {}
+        self.vms = b""
+        self.headless = True
+        self.id = False
+        self.num = False
+        self.running = copy.deepcopy(self.info('runningvms'))
+        self.info('vms')
+        if isinstance(n, str) and len(n) > 5:
+            self.id = n
+        elif int(n) >= 0:
+            self.num = int(n)
+            self.id = self.dicvm[self.num][0]
 
-def show():
-    global dicvm
-    if len(dicvm) == 0:
-        exit('[-]   No (running) VM')
-    for i in dicvm:
-        print("{} : {} : {}".format(i, dicvm[i][1], dicvm[i][0]))
-
-def choice():
-    resp = input("| Choose one :) : ")
-    while int(resp) not in dicvm:
-        resp = input("| Choose one :) = ")
-    return resp
-
-def start(ID, b):
-    if b:
-        os.system('vboxmanage startvm {} --type headless'.format(ID))
-    else:
-        os.system('vboxmanage startvm {}'.format(ID))
-
-def ctlvm(ID, x):
-    os.system('vboxmanage controlvm {} {}'.format(ID, x))
-
-def usage():
-    print("[-]   Usage: {0} <start|stop|fstop|reset|save> \option<id>\n   else: {0} <svc0|svc1||list|listrun>".format(sys.argv[0]))
-    exit(1)
-
-if len(sys.argv) == 1:
-    usage()
-
-if sys.argv[1] == 'svc0':
-    svc("stop")
-    exit(0)
-elif sys.argv[1] == 'svc1':
-    svc("start")
-    exit(0)
-elif sys.argv[1] == 'list':
-    info("vms")
-    show()
-    exit(0)
-elif sys.argv[1] == 'listrun':
-    info("runningvms")
-    show()
-    exit(0)
-elif sys.argv[1] not in ['svc0', 'svc1', 'list', "start", "stop", "fstop", 'listrun', 'reset', "save"]:
-    usage()
-
-info("vms")
-present = False
-if len(sys.argv) == 3:
-    for i in dicvm:
-        if sys.argv[2] == dicvm[i][0]:
-            present = True
-            if sys.argv[1].lower() == "start":
-                head = input("| Start headless ? : ")
-                if head.lower() != "n":
-                    start(sys.argv[2], True)
+    def info(self, x):
+        warning = False
+        self.vms = check_output(['vboxmanage', 'list', x]).split(b'\n')
+        for co, vm in enumerate(self.vms[:-1]):
+            if b"WARNING" in vm.upper():
+                warning = True
+                print("[!]   WARNING! kernel module is not loaded")
+            elif re.findall(b'........-....-....-....-............', vm):
+                self.dicvm[co] = []
+                name = vm.split(b" {")[0].decode()
+                ID = vm.split(b' {')[1].replace(b'}', b'').decode().strip()
+                self.dicvm[co].append(ID)
+                self.dicvm[co].append(name)
+        if warning:
+            a = False
+            r = input('| Do you want to start services ? : ').lower()
+            while not a:
+                if r == 'y' or r == 'yes':
+                    self.svc("start")
+                    a = True
+                elif r == 'n' or r == 'no':
+                    a = True
+                    self.show()
+                    exit(0)
                 else:
-                    start(sys.argv[2], False)
-            elif sys.argv[1].lower() == "stop":
-                ctlvm(sys.argv[2], "acpipowerbutton")
-            elif sys.argv[1].lower() == "fstop":
-                ctlvm(sys.argv[2], "poweroff")
-            elif sys.argv[1].lower() == "reset":
-                ctlvm(sys.argv[2], "reset")
-            elif sys.argv[1].lower() == "save":
-                ctlvm(sys.argv[2], "savestate")
-    if not present:
-        print("[-]   ID incorrect !:.")
-        show()
-        exit(1)
+                    r = raw_input('| Do you want to start services ? = ').lower()
+        
+        return self.dicvm
+    
+    def svc(self, x):
+        os.system('sudo systemctl {} vboxautostart-service.service vboxballoonctrl-service.service vboxdrv.service vboxweb-service.service'.format(x))
+    
+    def show(self, running=False):
+        if running:
+            to_print = self.running
+        else:
+            to_print = self.dicvm
+        if len(to_print) == 0:
+            exit('[-]  No (running) VM')
+        print()
+        for i in to_print:
+            print("{} : {} : {}".format(i, to_print[i][1], to_print[i][0]))
+    
+    def choice(self):
+        self.show()
+        resp = int(input("| Choose one :) : "))
+        while resp not in self.dicvm:
+            resp = int(input("| Choose one :) = "))
+        self.id = self.dicvm[resp][0]
+        self.num = resp
+    
+    def start(self):
+        if not self.id:
+            self.choice()
+        self.ask_headless()
+        if self.headless:
+            os.system('vboxmanage startvm {} --type headless'.format(self.id))
+        else:
+            os.system('vboxmanage startvm {}'.format(self.id))
+    
+    def ctlvm(self, x):
+        if not self.id:
+            self.choice()
+        os.system('vboxmanage controlvm {} {}'.format(self.id, x))
 
-elif len(sys.argv) == 2:
-    if "stop" in sys.argv[1].lower() or "reset" in sys.argv[1].lower() or "save" in sys.argv[1].lower():
-        info("runningvms")
-        show()
-    else:
-        show()
-    c = choice()
-    for i in dicvm:
-        if c == str(i):
-            present = True
-            if sys.argv[1].lower() == "start":
-                head = input("| Start headless ? : ")
-                if head.lower() != "n":
-                    start(dicvm[int(c)][0], True)
-                else:
-                    start(dicvm[int(c)][0], False)
-            elif sys.argv[1].lower() == "stop":
-                ctlvm(dicvm[int(c)][0], "acpipowerbutton")
-            elif sys.argv[1].lower() == "fstop":
-                ctlvm(dicvm[int(c)][0], "poweroff")
-            elif sys.argv[1].lower() == "reset":
-                ctlvm(dicvm[int(c)][0], "reset")
-            elif sys.argv[1].lower() == "save":
-                ctlvm(dicvm[int(c)][0], "savestate")
-    if not present:
-        print("[-]   ID incorrect !:.")
-        show()
-        exit(1)
+    def ask_headless(self):
+        head = input("| Start headless ? : ")
+        if head.lower() != "n":
+            self.headless = True
+        else:
+            self.headless = False
+
+    def compact(self):
+        hddic = {}
+        hdds = check_output(['vboxmanage', 'list', 'hdds'])
+        for i, hdd in enumerate(hdds.split(b'\n\n')[:-1]):
+            hddic[i] = []
+            for v in hdd.split(b'\n'):
+                if b'UUID' in v and not b"Parent" in v:
+                    hddic[i].append(v.split(b' ')[-1].decode())
+                elif b'Location' in v:
+                    hddic[i].append(v.split(b' ')[-1].decode())
+            if self.id in hddic[i]:
+                os.system(f"vboxmanage modifymedium disk '{hddic[i][1]}' --compact")
+                exit()
+        
+        for i, h in hddic.items():
+            print(i, h)
+        r = int(input("| Which one ? "))
+        while r not in hddic:
+            r = int(input("| Which one :) "))
+        os.system(f"vboxmanage modifymedium disk '{hddic[r][1]}' --compact")
+
+parser = ArgumentParser(prog=argv[0], usage=f'{argv[0]} -a <action> -n <num> -i <id>')
+parser.add_argument('-a', "--action", type=str, help='action to execute', choices=["start", "stop", "fstop", 'reset', "save", 'svc0', 'svc1', 'list', 'listrun', "pause", "resume", "compact"])
+group = parser.add_mutually_exclusive_group()
+group.add_argument('-n', "--num", type=str, help='number of the vm (show with list)')
+group.add_argument('-i', "--id", type=str, help='id of the vm')
+args = parser.parse_args()
+
+if not args.action:
+    parser.print_help()
+
+if not args.num and not args.id:
+    current = VMman()
+elif args.num:
+    current = VMman(args.num)
+elif args.id:
+    current = VMman(args.id)
+
+if args.action in ["listrun","list"]:
+    current.show(actions[args.action])
+elif args.action in ['svc0', 'svc1']:
+    current.svc(actions[args.action])
+elif args.action in ["stop", "fstop", 'reset', "save", "pause", "resume"]:
+    current.ctlvm(actions[args.action])
+elif args.action == "start":
+    current.start()
+elif args.action == "compact":
+    current.compact()
+
+
+
