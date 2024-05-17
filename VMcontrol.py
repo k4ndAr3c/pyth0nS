@@ -84,14 +84,20 @@ class VMman(str):
         self.id = self.dicvm[resp][0]
         self.num = resp
     
-    def start(self):
+    def start(self, hl='default'):
         if not self.id:
             self.choice()
-        self.ask_headless()
-        if self.headless:
-            os.system('vboxmanage startvm {} --type headless'.format(self.id))
+        if hl == 'default':
+            self.ask_headless()
+            if self.headless:
+                os.system('vboxmanage startvm {} --type headless'.format(self.id))
+            else:
+                os.system('vboxmanage startvm {}'.format(self.id))
         else:
-            os.system('vboxmanage startvm {}'.format(self.id))
+            if not hl:
+                os.system('vboxmanage startvm {}'.format(self.id))
+            else:
+                os.system('vboxmanage startvm {} --type headless'.format(self.id))
     
     def ctlvm(self, x):
         if not self.id:
@@ -126,8 +132,11 @@ class VMman(str):
             r = int(input("| Which one :) "))
         os.system(f"vboxmanage modifymedium disk '{hddic[r][1]}' --compact")
 
-parser = ArgumentParser(prog=argv[0], usage=f'{argv[0]} -a <action> -n <num> -i <id>')
-parser.add_argument('-a', "--action", type=str, help='action to execute', choices=["start", "stop", "fstop", 'reset', "save", 'svc0', 'svc1', 'list', 'listrun', "pause", "resume", "compact"])
+parser = ArgumentParser(prog=argv[0], usage=f'{argv[0]} <action> -n <num> -i <id> <-H|-S>')
+parser.add_argument('action', type=str, help='action to execute', choices=["start", "stop", "fstop", 'reset', "save", 'svc0', 'svc1', 'list', 'listrun', "pause", "resume", "compact"])
+group_head = parser.add_mutually_exclusive_group()
+group_head.add_argument('-H', "--headless", help='start the vm headless', action='store_true')
+group_head.add_argument('-S', "--show", help='start the vm with graphics', action='store_true')
 group = parser.add_mutually_exclusive_group()
 group.add_argument('-n', "--num", type=str, help='number of the vm (show with list)')
 group.add_argument('-i', "--id", type=str, help='id of the vm')
@@ -150,7 +159,12 @@ elif args.action in ['svc0', 'svc1']:
 elif args.action in ["stop", "fstop", 'reset', "save", "pause", "resume"]:
     current.ctlvm(actions[args.action])
 elif args.action == "start":
-    current.start()
+    if args.headless:
+        current.start(True)
+    elif args.show:
+        current.start(False)
+    else:
+        current.start()
 elif args.action == "compact":
     current.compact()
 
