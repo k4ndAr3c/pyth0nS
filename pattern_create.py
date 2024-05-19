@@ -1,1 +1,0 @@
-/pentest/PeNtEsT/pentestscr1pts/python/PWNS/pattern_create.py
