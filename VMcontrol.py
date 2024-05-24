@@ -59,12 +59,12 @@ class VMman(str):
                     exit(0)
                 else:
                     r = raw_input('| Do you want to start services ? = ').lower()
-        
+
         return self.dicvm
-    
+
     def svc(self, x):
         os.system('sudo systemctl {} vboxautostart-service.service vboxballoonctrl-service.service vboxdrv.service vboxweb-service.service'.format(x))
-    
+
     def show(self, running=False):
         if running:
             to_print = self.running
@@ -75,15 +75,20 @@ class VMman(str):
         print()
         for i in to_print:
             print("{} : {} : {}".format(i, to_print[i][1], to_print[i][0]))
-    
-    def choice(self):
-        self.show()
+
+    def choice(self, running=False):
+        if running:
+            self.show(True)
+            d = self.running
+        else:
+            self.show()
+            d = self.dicvm
         resp = int(input("| Choose one :) : "))
-        while resp not in self.dicvm:
+        while resp not in d:
             resp = int(input("| Choose one :) = "))
-        self.id = self.dicvm[resp][0]
+        self.id = d[resp][0]
         self.num = resp
-    
+
     def start(self, hl='default'):
         if not self.id:
             self.choice()
@@ -98,10 +103,10 @@ class VMman(str):
                 os.system('vboxmanage startvm {}'.format(self.id))
             else:
                 os.system('vboxmanage startvm {} --type headless'.format(self.id))
-    
+
     def ctlvm(self, x):
         if not self.id:
-            self.choice()
+            self.choice(True)
         os.system('vboxmanage controlvm {} {}'.format(self.id, x))
 
     def ask_headless(self):
@@ -120,13 +125,21 @@ class VMman(str):
                 if b'UUID' in v and not b"Parent" in v:
                     hddic[i].append(v.split(b' ')[-1].decode())
                 elif b'Location' in v:
-                    hddic[i].append(v.split(b' ')[-1].decode())
+                    loc = v.split(b"       ")[1]
+                    if os.path.exists(loc):
+                        hddic[i].append(loc.decode())
+                    else:
+                        del hddic[i]
+                        i -= 1
             if self.id in hddic[i]:
+                print(hddic[i])
                 os.system(f"vboxmanage modifymedium disk '{hddic[i][1]}' --compact")
                 exit()
-        
+
         for i, h in hddic.items():
-            print(i, h)
+            size = os.path.getsize(hddic[i][1])
+            size = size / 1024**3
+            print(f"{i} : {h} : {size:.2f}G")
         r = int(input("| Which one ? "))
         while r not in hddic:
             r = int(input("| Which one :) "))
