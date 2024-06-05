@@ -145,8 +145,15 @@ class VMman(str):
             r = int(input("| Which one :) "))
         os.system(f"vboxmanage modifymedium disk '{hddic[r][1]}' --compact")
 
+    def live(self, iso):
+        os.system(f'storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --medium "none"')
+        os.system(f'vboxmanage storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --type dvddrive --medium "{os.path.realpath(iso)}"')
+        self.start()
+
+
 parser = ArgumentParser(prog=argv[0], usage=f'{argv[0]} <action> -n <num> -i <id> <-H|-S>')
-parser.add_argument('action', type=str, help='action to execute', choices=["start", "stop", "fstop", 'reset', "save", 'svc0', 'svc1', 'list', 'listrun', "pause", "resume", "compact"])
+parser.add_argument('action', type=str, help='action to execute', choices=["start", "stop", "fstop", 'reset', "save", 'svc0', 'svc1', 'list', 'listrun', "pause", "resume", "compact", "live"])
+parser.add_argument('-I', '--iso', type=str, help='path to the iso file')
 group_head = parser.add_mutually_exclusive_group()
 group_head.add_argument('-H', "--headless", help='start the vm headless', action='store_true')
 group_head.add_argument('-S', "--show", help='start the vm with graphics', action='store_true')
@@ -180,6 +187,10 @@ elif args.action == "start":
         current.start()
 elif args.action == "compact":
     current.compact()
+elif args.action == "live":
+    if not args.id:
+        exit("Please provide an id")
+    current.live(args.iso)
 
 
 
