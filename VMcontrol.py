@@ -146,7 +146,7 @@ class VMman(str):
         os.system(f"vboxmanage modifymedium disk '{hddic[r][1]}' --compact")
 
     def live(self, iso):
-        os.system(f'storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --medium "none"')
+        os.system(f'vboxmanage storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --medium "none"')
         os.system(f'vboxmanage storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --type dvddrive --medium "{os.path.realpath(iso)}"')
         self.start()
 
