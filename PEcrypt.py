@@ -1,3 +1,4 @@
+#!/usr/bin/env python2
 #PEcrypt - use a string key to encrypt/decrypt another string
 # -*- coding: utf-8 -*-
 #        - Simon Peverett - January 2004

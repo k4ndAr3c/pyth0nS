@@ -112,7 +112,7 @@ def update_repos(directory):
                 try:
                     gd.remote()
                     gd.update_environment(GIT_SSH_COMMAND=ssh_cmd)
-                    out = gd.pull()
+                    out = gd.pull(progress=True)
                     if "Already up to date." in out:
                         lpurple(out)
                     else:

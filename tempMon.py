@@ -13,7 +13,7 @@ u = check_output(["whereis", "uptime"]).split()[1]
 def doIt():
     a = check_output(s)
     b = b' '.join(check_output(u).split()[-3:]).decode()
-    temps = re.findall(b'\ \ \+[0-9]{2}\.[0-9]{1}\xc2\xb0', a)
+    temps = re.findall(b'  \\+[0-9]{2}.[0-9]{1}\xc2\xb0', a)
     for i in temps:
         i = i.decode().strip().replace('+', '')
         if int(i[:2]) >= 70:

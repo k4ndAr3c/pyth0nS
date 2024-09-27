@@ -47,7 +47,8 @@ def doIt(chall):
         with open('premiums_challs', 'a') as f:
             f.write(f'{title}, {s}\n')
     except Exception as e:
-        print("[-] {} {}".format(chall, e))
+        #print("[-] {} {}".format(chall, e))
+        pass
     if errors: return "Err"
     else: return "OK"
 

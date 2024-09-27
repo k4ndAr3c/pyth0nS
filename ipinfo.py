@@ -20,7 +20,7 @@ class IPInfoFetcher:
             print("Failed to retrieve IP information:", e)
             return None
 
-    def display_ip_info(self, ip_info):
+    def display_ip_info(self, ip_info, prog):
         if ip_info:
             print(f"\nIP Addr:    {ip_info.get('ip')}")
             print(f"Hostname:   {ip_info.get('hostname')}")
@@ -29,6 +29,7 @@ class IPInfoFetcher:
             print(f"Country:    {ip_info.get('country')}")
             print(f"Location:   {ip_info.get('loc')}")
             print(f"ISP:        {ip_info.get('org')}")
+            print(f"Prog:       {prog}")
 
 def get_network_connections():
     connections = psutil.net_connections(kind='tcp')
@@ -38,15 +39,24 @@ def get_network_connections():
         laddr = f"{conn.laddr.ip} {conn.laddr.port}"
         raddr = f"{conn.raddr.ip} {conn.raddr.port}" if conn.raddr else ""
         pid = conn.pid if conn.pid else ""
+        prog = get_process_name(pid) if conn.pid else ""
         connection_info.append({
             "proto": "tcp",
             "local_address": laddr,
             "remote_address": raddr,
             "state": conn.status,
-            "pid": pid
+            "pid": pid,
+            "prog": prog
         })
 
     return connection_info
+
+def get_process_name(pid):
+    try:
+        process = psutil.Process(int(pid))
+        return process.name()
+    except psutil.NoSuchProcess:
+        return f"No process found with PID {pid}"
 
 def print_connections(connection_info):
     print(f"{'Proto':<5} {'Local Address':<25} {'Remote Address':<25} {'State':<13} {'PID':<5}")
@@ -55,21 +65,20 @@ def print_connections(connection_info):
 
 def main():
     fetcher = IPInfoFetcher()
-    cons = set()
+    cons = dict()
     
     connections = get_network_connections()
     for c in connections:
         if "127.0.0.1" not in c["local_address"] and "127.0.0.1" not in c["remote_address"] \
             and "10.42.1" not in c["remote_address"] \
             and "192.168." not in c["remote_address"]:
-            cons.add(c['remote_address'].split(' ')[0])
+            cons[c['remote_address'].split(' ')[0]] = c['prog']
 
     print_connections(connections)
-
     for addr in cons:
         if addr != '' and addr is not None:
             ip_info = fetcher.get_ip_info(addr)
-            fetcher.display_ip_info(ip_info)
+            fetcher.display_ip_info(ip_info, cons[addr])
 
 if __name__ == "__main__":
     main()

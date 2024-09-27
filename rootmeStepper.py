@@ -3,6 +3,7 @@
 from itertools import combinations, product
 from bs4 import BeautifulSoup
 from time import sleep
+from datetime import date
 import argparse
 import requests
 from random import choice
@@ -11,6 +12,7 @@ from colorama import init as colorama_init, Fore, Style
 CATEGORIES = ['Steganography', 'Cryptanalysis', 'Forensic', 'Programming', 'Cracking', 'Realist', 'Web-Server', 'App-System', 'App-Script', 'Web-Client', 'Network']
 HEAD = {'User-Agent':'Firefox 170'}
 COLORS = [Fore.RED, Fore.GREEN, Fore.YELLOW, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.WHITE]
+r1 = choice(COLORS)
 
 try:
     PREMIUMS = open('/root/bin/premiums_challs', 'r').read().split('\n')[:-1]
@@ -38,7 +40,7 @@ def get_challenges(page):
 	return todos
 
 def get_points(page):
-	points = int(page.find_all("h3")[5].text)
+	points = int(page.find_all("h3")[4].text)
 	return points
 
 def filter_by_categories(challenges, add_categories, remove_categories):
@@ -87,8 +89,9 @@ def display_welcome():
     pass
 
 def display_results(username, points, goal, combinations):
-    print(f"{Fore.BLUE}[*]{Style.RESET_ALL} {username} : {points}")
     print(f"{Fore.BLUE}[*]{Style.RESET_ALL} Goal : {goal}")
+    print(f"{Fore.BLUE}[*]{Style.RESET_ALL} Diff : {goal-points}")
+    print(f"{Fore.BLUE}[*]{Style.RESET_ALL} {username} : {points}")
     print()
     print(f"{Fore.GREEN}[+]{Style.RESET_ALL} Found {Fore.YELLOW}{len(combinations)}{Style.RESET_ALL} combinations")
     print()
@@ -167,6 +170,7 @@ def get_next(pseudo):
         exit()
 
 def main():
+    r2 = choice(COLORS)
     colorama_init()
     #display_welcome()
     username, goal, depth, MAX, SEC, N, L, P, add_categories, exclude_categories = parse_args()
@@ -194,6 +198,7 @@ def main():
         cmb = compute_combinations(challenges, points, goal, depth)
         display_results(username, points, goal, cmb)
         exit(0)
+    r3 = choice(COLORS)
 
     sorted_challs = sorted(challenges, key=lambda x: x[2])
 
@@ -238,13 +243,11 @@ def main():
     i = 0
     todos = reversed(sorted(todos, key=lambda x: x[1]))
     with open('/tmp/todo_challs.txt', 'w') as f:
-        r1 = choice(COLORS)
-        r2 = choice(COLORS)
-        r3 = choice(COLORS)
         r4 = choice(COLORS)
         for t in todos:
             if i > MAX: 
-                print()
+                print(f"[+] [date           >  {str(date.today())}\n")
+                f.write(f"[+] [date           >  {str(date.today())}\n")
                 exit(0)
             s = f"{r1}[+]{Style.RESET_ALL} [{t[0][0]:<15}> {r2} {t[0][1]:<40}  {r3}{t[0][2]} pts{Style.RESET_ALL} => {r4}{t[1]} vals{Style.RESET_ALL}"
             print(s)
