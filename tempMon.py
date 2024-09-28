@@ -34,7 +34,6 @@ if not x:
     except KeyboardInterrupt:
         exit(0)
 else:
-    for _i in range(int(sys.argv[1]))[::-1]:
+    for _ in range(int(sys.argv[1])):
         doIt()
-        if _i == 0: exit()
         sleep(1)
