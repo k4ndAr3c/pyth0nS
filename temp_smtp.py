@@ -19,6 +19,7 @@ class Handler:
             print("\nDecode:", unquote(body))
         except:
             pass
+        print("@"*51)
         
         epoch = str(time()).split('.')[0]
         with open(f"email_{epoch}.eml", "wb") as f:
