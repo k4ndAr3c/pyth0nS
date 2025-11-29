@@ -4,6 +4,7 @@ from aiosmtpd.controller import Controller
 from email.parser import BytesParser
 from time import sleep
 from urllib.parse import unquote
+from time import time
 
 class Handler:
     async def handle_DATA(self, server, session, envelope):
@@ -19,7 +20,8 @@ class Handler:
         except:
             pass
         
-        with open("latest_email.eml", "wb") as f:
+        epoch = str(time()).split('.')[0]
+        with open(f"email_{epoch}.eml", "wb") as f:
             f.write(envelope.content)
         # do whatever processing you want here
         return '250 Message accepted for delivery'
