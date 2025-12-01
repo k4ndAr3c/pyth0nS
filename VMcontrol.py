@@ -143,7 +143,10 @@ class VMman(str):
         r = int(input("| Which one ? "))
         while r not in hddic:
             r = int(input("| Which one :) "))
+        size1 = os.path.getsize(hddic[r][1]) / 1024**3
         os.system(f"vboxmanage modifymedium disk '{hddic[r][1]}' --compact")
+        size2 = os.path.getsize(hddic[r][1]) / 1024**3
+        print(f"\n[+] {size1-size2:.2f}G freed.")
 
     def live(self, iso):
         os.system(f'vboxmanage storageattach "{self.id}" --storagectl IDE --port 0 --device 0 --medium "none"')
