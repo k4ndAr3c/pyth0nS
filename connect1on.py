@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+
+from getpass import getpass
 import requests, json, os, sys
 
 api_link = 'https://api.www.root-me.org'
@@ -9,7 +11,9 @@ else:
     login = "kandashaka"
 passwd = os.getenv('P4SSW0RD')
 if passwd == '' or passwd == None:
-    exit("[-] Must provide P4SSW0RD env variable")
+    print("[-] You can provide P4SSW0RD env variable")
+    passwd = getpass("Password for {}: ".format(login))
+
 r = requests.post(api_link + "/login", data={"login":login, "password":passwd}, headers=headers)
 if r.status_code != 200: print('An error occured (HTTP %d)' % r.status_code)
 else:
