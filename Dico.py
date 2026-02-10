@@ -14,7 +14,7 @@ html = page.read()
 
 soup = BeautifulSoup(html, 'lxml')
 
-li = soup.findAll("li", attrs={'class':'DivisionDefinition'})
+li = soup.find_all("li", attrs={'class':'DivisionDefinition'})
 for i in li:
     f = re.findall(r1, str(i))
     for j in f:
