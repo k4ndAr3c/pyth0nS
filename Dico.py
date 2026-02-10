@@ -18,4 +18,4 @@ li = soup.find_all("li", attrs={'class':'DivisionDefinition'})
 for i in li:
     f = re.findall(r1, str(i))
     for j in f:
-        print(j.replace('&nbsp', '\n').replace(';: <span class="ExempleDefinition">', 'Ex: ').replace('</span>','')+'\n')
+        print(j.replace('&nbsp','\n').replace('<span class="numDef"','').replace(': <span class="ExempleDefinition">','. Ex: ').replace('</span>','')+'\n')
