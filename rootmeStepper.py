@@ -10,7 +10,7 @@ from random import choice
 from colorama import init as colorama_init, Fore, Style
 
 CATEGORIES = ['Steganography', 'Cryptanalysis', 'Forensic', 'Programming', 'Cracking', 'Realist', 'Web-Server', 'App-System', 'App-Script', 'Web-Client', 'Network']
-HEAD = {'User-Agent':'Firefox 170'}
+HEAD = {'User-Agent':'curl/8.15.0'}
 COLORS = [Fore.RED, Fore.GREEN, Fore.YELLOW, Fore.BLUE, Fore.MAGENTA, Fore.CYAN, Fore.WHITE]
 r1 = choice(COLORS)
 
@@ -220,6 +220,7 @@ def main():
     all_cat.append([c for c, n, p in sorted_challs])
     all_cat = set(all_cat[0])
     links_name = []
+    links = []
     for _ in CATEGORIES:
         if _.lower() in all_cat:
             print(_, end=" ", flush=True)
