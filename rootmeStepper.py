@@ -4,7 +4,7 @@ from itertools import combinations, product
 from bs4 import BeautifulSoup
 from time import sleep
 from datetime import date
-import argparse
+import argparse, re
 import requests
 from random import choice
 from colorama import init as colorama_init, Fore, Style
@@ -42,6 +42,10 @@ def get_challenges(page):
 def get_points(page):
 	points = int(page.find_all("h3")[4].text)
 	return points
+
+def get_date(page):
+	date = re.findall(r'<td class="show-for-large-up">(\d{1,2} [A-Za-z]+ \d{4})</td>', page)
+	return date
 
 def filter_by_categories(challenges, add_categories, remove_categories):
     global CATEGORIES
@@ -216,6 +220,7 @@ def main():
 
     #print(sorted_challs)
     val_dic = {}
+    dates_dic = {}
     all_cat = []
     all_cat.append([c for c, n, p in sorted_challs])
     all_cat = set(all_cat[0])
@@ -225,21 +230,21 @@ def main():
         if _.lower() in all_cat:
             print(_, end=" ", flush=True)
             res = get_validations(_)
+            dates = get_date(str(res))
             validations = get_val_val(res)
-            #print(validations)
             links = get_href(res, _)
-            #print(links)
             assert len(validations) == len(links)
+            assert len(validations) == len(dates)
             sleep(SEC)
         for i in range(len(links)):
             val_dic[links[i]] = validations[i]
-        #print(val_dic)
+            dates_dic[links[i]] = dates[i]
     
     todos = []
     print("\n")
     for todo in sorted_challs:
         if todo[1] in val_dic.keys():
-            todos.append( (todo, val_dic[todo[1]]) )
+            todos.append( (todo, val_dic[todo[1]], dates_dic[todo[1]]) )
     
     i = 0
     todos = reversed(sorted(todos, key=lambda x: x[1]))
@@ -250,7 +255,7 @@ def main():
                 print(f"[+] [date           >  {str(date.today())}\n")
                 f.write(f"[+] [date           >  {str(date.today())}\n")
                 exit(0)
-            s = f"{r1}[+]{Style.RESET_ALL} [{t[0][0]:<15}> {r2} {t[0][1]:<40}  {r3}{t[0][2]} pts{Style.RESET_ALL} => {r4}{t[1]} vals{Style.RESET_ALL}"
+            s = f"{r1}[+]{Style.RESET_ALL} [{t[0][0]:<15}> {r2} {t[0][1]:<40}  {r3}{t[0][2]} pts{Style.RESET_ALL} => {r4}{t[1]} vals{Style.RESET_ALL} - {t[2].split()[-1]}"
             print(s)
             f.write(s+"\n")
             i += 1
