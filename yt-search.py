@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from youtubesearchpython import *
 import sys, json, os
 from colorama import *
@@ -80,7 +82,7 @@ def main():
                 if res == d[t]["num"]:
                     print(d[t]["url"])
                     d1r = input('Where ? ')
-                    if "\\" in d1r:
+                    if "\\" in d1r or "/" in d1r:
                         os.system("cd {} && yt-dlp -f 18 {}".format(d1r, d[t]["url"]))
                     else:
                         os.system("yt-dlp -f 18 {}".format(d[t]["url"]))
@@ -88,16 +90,20 @@ def main():
 
 def lookup():
     dones = []
-    chans = open("chans.txt", 'r').read().splitlines()
+    home = os.path.expanduser('~')
+    chans = open(f"{home}/bin/chans.txt", 'r').read().splitlines()
     for c in chans:
-        cs = CustomSearch(f"{c}", VideoUploadDateFilter.thisWeek, limit=2)
-        d = json.loads(json.dumps(cs.result()))
+        try:
+            cs = CustomSearch(f"{c}", VideoUploadDateFilter.thisWeek, limit=2)
+            d = json.loads(json.dumps(cs.result()))
+        except:
+            continue
         for idx in range(len(d['result'])):
             try:
                 d = d['result'][idx]
                 #print(d)
             except:
-                pass
+                continue
             if d['type'] == "channel":
                 continue
             if d['title'] in dones:
