@@ -18,16 +18,19 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Traducteur en ligne de commande en python utilisant Google Traduction.')
     parser.add_argument('-s', help='Langue source')
     parser.add_argument('-d', help='Langue de destination')
-    parser.add_argument('mot', nargs='+', help='Texte à traduire')
+    parser.add_argument('mot', nargs='*', help='Texte à traduire')
     args = parser.parse_args()
     
     source = args.s
     dest = args.d
-    texte_tab = args.mot
-    texte = ""
     
-    for mot in texte_tab:
-        texte += mot+" "
+    if args.mot:
+        texte = " ".join(args.mot)
+    elif not sys.stdin.isatty():
+        texte = sys.stdin.read()
+    else:
+        parser.print_help()
+        sys.exit(1)
     
     trad = traduc(texte, source, dest)
 
