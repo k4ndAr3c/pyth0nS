@@ -74,7 +74,10 @@ class VMman(str):
             exit('[-]  No (running) VM')
         print()
         for i in to_print:
-            print("{} : {} : {}".format(i, to_print[i][1], to_print[i][0]))
+            if running:
+                print(f"{i} : {to_print[i][1]} : {to_print[i][0]}")
+            else:
+                print(f"{i} : {to_print[i][1]} : {to_print[i][0]} {'(running)' if to_print[i][0] in [x[0] for x in self.running.values()] else ''}")
 
     def choice(self, running=False):
         if running:
