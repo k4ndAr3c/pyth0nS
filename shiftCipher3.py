@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 import sys, os
 if os.path.isfile(sys.argv[1]):
-	data = open(sys.argv[1], 'r').read()
+	data = open(sys.argv[1], 'rb').read()
 else:
-	data = sys.argv[1]
-out = ''
+	data = sys.argv[1].encode("latin-1")
+out = b''
 for d in data:
-	out += chr(ord(d)-int(sys.argv[2]))
+	out += chr(d-int(sys.argv[2])).encode('latin-1')
 print(out)
