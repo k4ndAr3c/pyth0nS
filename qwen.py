@@ -22,7 +22,8 @@ Usage:
   qwen.py del <chat_id>        # delete a saved conversation
   qwen.py token                # show the stored token (masked)
   qwen.py logout
-  qwen.py ds [ask|chat|models] # DeepSeek via local Deepseek-API proxy
+  qwen.py ds [ask|chat|models|history|new|use|del]
+                               # DeepSeek via local Deepseek-API proxy
                                #   (git clone Deepseek-API && python app.py)
 
 Interactive REPL commands:
@@ -1514,19 +1515,82 @@ def cmd_ds(args):
         c.close()
         return
 
+    if args.sub == "history":
+        chats = c.list_chats()
+        if not chats:
+            dim("No saved conversations.")
+            c.close()
+            return
+        table = Table(title="DeepSeek conversations", box=box.SIMPLE_HEAD) if _RICH else None
+        rows = []
+        for ch in chats:
+            rows.append((
+                ch.get("id", "?"),
+                (ch.get("title") or "(untitled)")[:60],
+                datetime.fromtimestamp(int(ch.get("updated_at", 0)), timezone.utc).strftime("%Y-%m-%d %H:%M") if ch.get("updated_at") else "?",
+                ch.get("model", ""),
+            ))
+        if table:
+            for cid_, title, ts, model in rows:
+                table.add_row(cid_, title, ts, model)
+            _console.print(table)
+        else:
+            for cid_, title, ts, model in rows:
+                print(f"{cid_}  {title:50} {ts}  {model}")
+        c.close()
+        return
+
+    if args.sub == "new":
+        c.new_conversation()
+        okmsg("New DeepSeek conversation (saved on first message).")
+        c.close()
+        return
+
+    if args.sub == "use":
+        if not args.rest or not args.rest[0]:
+            emsg("usage: qwen.py ds use <chat_id>")
+            c.close()
+            return
+        chat_id = args.rest[0]
+        try:
+            data = c.use_chat(chat_id)
+            okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
+            ds_repl(c, args)
+        except deepseek_client.DeepSeekError as e:
+            emsg(str(e))
+        c.close()
+        return
+
+    if args.sub == "del":
+        if not args.rest or not args.rest[0]:
+            emsg("usage: qwen.py ds del <chat_id>")
+            c.close()
+            return
+        chat_id = args.rest[0]
+        try:
+            if c.delete_chat(chat_id):
+                okmsg(f"Deleted conversation {chat_id}.")
+            else:
+                emsg(f"Conversation {chat_id} not found.")
+        except deepseek_client.DeepSeekError as e:
+            emsg(str(e))
+        c.close()
+        return
+
     # ask
-    if not args.message:
+    msg = " ".join(args.rest or []) if args.sub == "ask" else " ".join([args.sub or ""] + list(args.rest or []))
+    if not msg:
         emsg('Nothing to ask. Use: qwen.py ds "your question"')
         c.close()
         return
     try:
         if args.no_stream:
-            ftx, cid, usage = c.chat_once(args.message, thinking=args.thinking,
+            ftx, cid, usage = c.chat_once(msg, thinking=args.thinking,
                                           search=args.search)
             cprint(ftx)
         else:
             ftx, cid, usage = c.stream_chat(
-                args.message, thinking=args.thinking, search=args.search,
+                msg, thinking=args.thinking, search=args.search,
                 on_delta=_stream_write)
             print()
         _show_links(ftx)
@@ -2306,9 +2370,9 @@ def main():
     # DeepSeek via the local Deepseek-API proxy (`python app.py` in Deepseek-API/).
     p_ds = sub.add_parser("ds", help="talk to DeepSeek via the local proxy")
     p_ds.add_argument("sub", nargs="?", default="ask",
-                      choices=["ask", "chat", "models"],
-                      help="action to run (default: ask)")
-    p_ds.add_argument("message", nargs="?", help="your question (for 'ask')")
+                      help="action: ask, chat, models, history, new, use, del ")
+    p_ds.add_argument("rest", nargs="*", default=[],
+                      help="chat id (for use/del) or your question (for ask)")
     p_ds.add_argument("-m", "--model", default=None,
                       help=f"model to use (default: {DEFAULT_MODEL})")
     p_ds.add_argument("--thinking", action="store_true", help="enable DeepThink reasoning")

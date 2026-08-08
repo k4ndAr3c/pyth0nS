@@ -10,6 +10,10 @@ that proxy — used by qwen.py's `ds` command:
     qwen.py ds ask "hello"
     qwen.py ds chat              # interactive REPL
     qwen.py ds models
+    qwen.py ds history           # list saved conversations
+    qwen.py ds new               # start a fresh conversation
+    qwen.py ds use <chat_id>     # resume a saved conversation
+    qwen.py ds del <chat_id>     # delete a saved conversation
 
 It supports SSE streaming, model selection, DeepThink (`thinking`), web
 `search`, and multi-turn threads via the proxy's `conversation_id` field.
