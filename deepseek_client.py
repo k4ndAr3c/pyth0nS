@@ -33,6 +33,21 @@ DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 KNOWN_MODELS = ("deepseek-chat", "deepseek-expert")
 
+# Friendly display names (Instant / Expert) map onto the real model ids the
+# proxy understands; /model and --model accept either.
+MODEL_ALIASES = {
+    "instant": "deepseek-chat",
+    "expert": "deepseek-expert",
+}
+
+
+def normalize_model(name: str) -> str:
+    """Resolve a friendly model name (e.g. 'Instant', 'instant') to the real
+    id the proxy accepts ('deepseek-chat'). Returns input unchanged if unknown."""
+    if not name:
+        return name
+    return MODEL_ALIASES.get(name.strip().lower(), name.strip())
+
 
 class DeepSeekError(Exception):
     pass
@@ -111,6 +126,9 @@ class DeepSeekSession:
         self.store = ConversationStore(store_path)
         # In-memory transcript of the live thread (used by /view & /print).
         self.log: list[dict] = []
+        # Set by list_chats()/sync_chats(): True when the online account could
+        # be reached (so /history is online-authoritative), False on fallback.
+        self.online_ok: bool = False
 
     # -- low level -------------------------------------------------------- #
     def _url(self, path: str) -> str:
@@ -191,8 +209,125 @@ class DeepSeekSession:
         self.store.save(chat)
         return key
 
+    @staticmethod
+    def _norm_ts(v):
+        """Normalize a timestamp (epoch ms or seconds) to integer seconds."""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return v
+        return int(f / 1000) if f > 1_000_000_000_000 else int(f)
+
+    @staticmethod
+    def _model_from_type(model_type) -> str:
+        """Map DeepSeek's wire model_type to the public model id."""
+        if model_type == "expert":
+            return "deepseek-expert"
+        return "deepseek-chat"
+
+    def _online_chats(self) -> list:
+        """Talk to the proxy's /v1/chats (online session list). Returns [] if
+        the proxy is old or unreachable, so callers fall back to the store."""
+        try:
+            r = self._session.get(self._url("/v1/chats"), timeout=15)
+        except requests.RequestException:
+            return []
+        if r.status_code != 200:
+            return []
+        try:
+            data = (r.json() or {}).get("data") or []
+            return [c for c in data if isinstance(c, dict)]
+        except ValueError:
+            return []
+
+    def _sync_from_online(self, prune: bool = True) -> tuple[list, dict]:
+        """Reconcile the local store against the online account.
+
+        The online session list (chat.deepseek.com `fetch_page`, proxied as
+        /v1/chats) is the source of truth for what conversations exist. Local
+        entries that no longer exist online are stale (deleted in the web UI,
+        or test leftovers) and get pruned; sessions online but unknown locally
+        are materialized in the store so /use & /print work on them too.
+
+        Returns (chats, summary) where summary = {pruned, added, updated}."""
+        online = self._online_chats()
+        summary = {"pruned": 0, "added": 0, "updated": 0}
+        if not online:
+            self.online_ok = False
+            return self.store.list(), summary
+
+        self.online_ok = True
+        local = {c["id"]: dict(c) for c in self.store.list()}
+
+        # Sessions online but missing locally get a minimal entry.
+        for s in online:
+            cid = s.get("id")
+            if not cid:
+                continue
+            entry = local.get(cid)
+            updated = self._norm_ts(s.get("updated_at"))
+            created = self._norm_ts(s.get("created_at"))
+            model = self._model_from_type(s.get("model_type"))
+            if entry is None:
+                local[cid] = {
+                    "id": cid,
+                    "title": s.get("title") or "(untitled)",
+                    "model": model,
+                    "created_at": created or updated,
+                    "updated_at": updated,
+                    "conversation_id": cid,
+                    "messages": [],
+                }
+                summary["added"] += 1
+            else:
+                changed = False
+                if s.get("title") and not entry.get("title_custom") \
+                        and entry.get("title") != s["title"]:
+                    entry["title"] = s["title"]
+                    changed = True
+                if created and not entry.get("created_at"):
+                    entry["created_at"] = created
+                    changed = True
+                if updated and entry.get("updated_at") != updated:
+                    entry["updated_at"] = updated
+                    changed = True
+                if not entry.get("model") or entry["model"] != model:
+                    entry["model"] = model
+                    changed = True
+                if changed:
+                    summary["updated"] += 1
+
+        if prune:
+            # Physically drop store entries that no longer exist online.
+            known = {s.get("id") for s in online}
+            for cid in list(local):
+                if cid not in known:
+                    del local[cid]
+                    if self.store.delete(cid):
+                        summary["pruned"] += 1
+
+        # Persist so /use, /del, /print, /rename and titles stay consistent.
+        for entry in local.values():
+            entry.setdefault("messages", [])
+            self.store.save(entry)
+
+        out = list(local.values())
+        out.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
+        return out, summary
+
     def list_chats(self) -> list:
-        return self.store.list()
+        """Conversations as they exist on the online account.
+
+        The online chat is authoritative: missing local entries are pruned and
+        server-generated titles win, so /history mirrors the real account. Falls
+        back to the local store (unchanged) if the proxy is unreachable."""
+        chats, _ = self._sync_from_online(prune=True)
+        return chats
+
+    def sync_chats(self) -> dict:
+        """Explicitly reconcile store <-> online and report what changed."""
+        _, summary = self._sync_from_online(prune=True)
+        return summary
 
     def use_chat(self, chat_id: str) -> dict:
         chat = self.store.get(chat_id)
@@ -207,14 +342,33 @@ class DeepSeekSession:
         return self.store.get(chat_id)
 
     def rename_chat(self, chat_id: str, title: str) -> bool:
+        # First rename online so the change is real (and survives resync);
+        # keep title_custom so a fallback to local-only doesn't resurrect the
+        # old title.
+        try:
+            self._session.patch(
+                self._url(f"/v1/chats/{chat_id}"),
+                json={"title": title}, timeout=30,
+            ).raise_for_status()
+        except requests.RequestException as e:
+            raise DeepSeekError(f"Online rename failed: {e}") from e
         chat = self.store.get(chat_id)
         if not chat:
-            return False
+            return True
         chat["title"] = title
+        chat["title_custom"] = True
         self.store.save(chat)
         return True
 
     def delete_chat(self, chat_id: str, force: bool = True) -> bool:
+        # Delete online first — the online account is the source of truth, so a
+        # local-only delete would just be re-spawned by the next sync.
+        try:
+            self._session.delete(
+                self._url(f"/v1/chats/{chat_id}"), timeout=30
+            ).raise_for_status()
+        except requests.RequestException as e:
+            raise DeepSeekError(f"Online delete failed: {e}") from e
         return self.store.delete(chat_id)
 
     # -- public ------------------------------------------------------------ #

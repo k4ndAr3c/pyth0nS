@@ -22,7 +22,7 @@ Usage:
   qwen.py del <chat_id>        # delete a saved conversation
   qwen.py token                # show the stored token (masked)
   qwen.py logout
-  qwen.py ds [ask|chat|models|history|new|use|del]
+  qwen.py ds [ask|chat|models|history|sync|new|use|del]
                                # DeepSeek via local Deepseek-API proxy
                                #   (git clone Deepseek-API && python app.py)
 
@@ -792,16 +792,6 @@ class QwenClient:
                 chats.append(item)
         return chats
 
-    def new_chat(self, title=""):
-        # Legacy v1 endpoint is retired; v2 create is used instead.
-        cid = self.create_chat()
-        if title:
-            try:
-                self.rename_chat(cid, title)
-            except QwenError:
-                pass
-        return {"id": cid}
-
     def get_chat(self, chat_id):
         r = self._request("GET", f"/v2/chats/{chat_id}", base=API)
         return r.json().get("data", {})
@@ -1439,7 +1429,7 @@ def cmd_use(args):
         return
     title = data.get("title") or "(untitled)"
     okmsg(f"Resumed conversation {args.chat_id} — {title}")
-    repl(c)
+    repl(c, init_title=data.get("title") or "")
 
 
 def cmd_delete(args):
@@ -1494,7 +1484,7 @@ def cmd_ds(args):
         emsg("deepseek_client module not found next to qwen.py.")
         return
     base = args.base_url or None
-    model = args.model or deepseek_client.DEFAULT_MODEL
+    model = deepseek_client.normalize_model(args.model or deepseek_client.DEFAULT_MODEL)
     if base:
         import os
         os.environ["DEEPSEEK_BASE_URL"] = base
@@ -1521,6 +1511,8 @@ def cmd_ds(args):
             dim("No saved conversations.")
             c.close()
             return
+        if not c.online_ok:
+            dim("(local only — online unreachable)")
         table = Table(title="DeepSeek conversations", box=box.SIMPLE_HEAD) if _RICH else None
         rows = []
         for ch in chats:
@@ -1540,6 +1532,15 @@ def cmd_ds(args):
         c.close()
         return
 
+    if args.sub == "sync":
+        try:
+            s = c.sync_chats()
+            okmsg(f"pruned: {s['pruned']}  added: {s['added']}  updated: {s['updated']}")
+        except deepseek_client.DeepSeekError as e:
+            emsg(str(e))
+        c.close()
+        return
+
     if args.sub == "new":
         c.new_conversation()
         okmsg("New DeepSeek conversation (saved on first message).")
@@ -1555,7 +1556,7 @@ def cmd_ds(args):
         try:
             data = c.use_chat(chat_id)
             okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
-            ds_repl(c, args)
+            ds_repl(c, args, init_title=data.get("title") or "")
         except deepseek_client.DeepSeekError as e:
             emsg(str(e))
         c.close()
@@ -1608,12 +1609,14 @@ def _ds_repl_help():
     print("""
 Commands:
   /help            this help
-  /model <name>    switch model (deepseek-chat / deepseek-expert)
+  /model <name>    switch model (deepseek-chat Instant / deepseek-expert Expert)
   /models          list available models
   /new             start a fresh conversation
+  /multi           toggle multiline input (end with a blank line)
   /status          current model + conversation
   /think           toggle DeepThink for subsequent messages
-  /history         list saved conversations (local store)
+  /history         list saved conversations (synced from the online account)
+  /sync            refresh from online: prune deleted, add missing, fix titles
   /use <id>        resume a saved conversation
   /view <id>       print a conversation + offer to save code blocks
   /print [full]    print current or given conversation (short unless 'full')
@@ -1628,19 +1631,47 @@ Links appearing in replies are listed automatically below the answer.
 """)
 
 
-def ds_repl(c, args):
+def _input_multiline(first_prompt, cont_prompt="  ... "):
+    """Read a multiline message. The first prompt is shown for the first line,
+    then a continuation prompt until a blank line (or Ctrl-D) ends it.
+    Ctrl-C aborts and returns "". Returns the joined message."""
+    lines: list[str] = []
+    try:
+        while True:
+            line = input(first_prompt if not lines else cont_prompt)
+            if not line:
+                break
+            lines.append(line)
+    except KeyboardInterrupt:
+        print()
+        return ""
+    except EOFError:
+        print()
+    return "\n".join(lines)
+
+
+def ds_repl(c, args, init_title=""):
     """DeepSeek REPL — same slash commands as the Qwen REPL, backed by the
     DeepSeek session's local conversation store."""
     init_readline()
     cprint(Panel.fit(f"DeepSeek proxy REPL — {c.model}", border_style="magenta"))
     dim("Type /help for commands, /exit to quit.")
 
+    conv_title = init_title
+    multiline = False
     while True:
-        try:
-            user = input("\n[You] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
+        if conv_title:
+            prompt = f"\n[{c.model}|{conv_title}] "
+        else:
+            prompt = f"\n[{c.model}] "
+        if multiline:
+            user = _input_multiline(prompt).strip()
+        else:
+            try:
+                user = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
         if not user:
             continue
 
@@ -1653,14 +1684,23 @@ def ds_repl(c, args):
             arg = arg.strip()
             if cmd in ("exit", "quit"):
                 break
+            elif cmd == "multi":
+                multiline = not multiline
+                okmsg(f"Multiline input {'on' if multiline else 'off'} — "
+                      f"{'end with a blank line.' if multiline else ''}")
             elif cmd == "help":
                 _ds_repl_help()
             elif cmd == "model":
                 if not arg:
                     warn(f"Current model: {c.model}")
                 else:
-                    c.model = arg
-                    okmsg(f"Switched to {arg}")
+                    resolved = deepseek_client.normalize_model(arg)
+                    if resolved not in deepseek_client.KNOWN_MODELS:
+                        emsg(f"Unknown model {arg!r}. Available: "
+                             + ", ".join(deepseek_client.KNOWN_MODELS))
+                    else:
+                        c.model = resolved
+                        okmsg(f"Switched to {c.model}")
             elif cmd == "models":
                 try:
                     for m in c.list_models():
@@ -1673,6 +1713,7 @@ def ds_repl(c, args):
                 okmsg(f"DeepThink {'on' if args.thinking else 'off'}")
             elif cmd in ("new", "reset"):
                 c.new_conversation()
+                conv_title = ""
                 okmsg("New conversation.")
             elif cmd == "status":
                 dim(f"model: {c.model} | base: {c.base_url}" if _RICH
@@ -1687,6 +1728,8 @@ def ds_repl(c, args):
                 if not chats:
                     dim("No saved conversations.")
                     continue
+                if not c.online_ok:
+                    dim("(local only — online unreachable)")
                 table = Table(title="DeepSeek conversations", box=box.SIMPLE_HEAD) if _RICH else None
                 rows = []
                 for ch in chats:
@@ -1703,12 +1746,19 @@ def ds_repl(c, args):
                 else:
                     for cid_, title, ts, model in rows:
                         print(f"{cid_}  {title:50} {ts}  {model}")
+            elif cmd == "sync":
+                try:
+                    s = c.sync_chats()
+                    okmsg(f"pruned: {s['pruned']}  added: {s['added']}  updated: {s['updated']}")
+                except deepseek_client.DeepSeekError as e:
+                    emsg(str(e))
             elif cmd == "use":
                 if not arg:
                     emsg("usage: /use <chat_id>")
                     continue
                 try:
                     data = c.use_chat(arg)
+                    conv_title = data.get("title") or ""
                     okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
                 except deepseek_client.DeepSeekError as e:
                     emsg(str(e))
@@ -1743,17 +1793,30 @@ def ds_repl(c, args):
             elif cmd == "rename":
                 if not arg:
                     emsg("usage: /rename <title>")
-                elif c.rename_chat(_cid_key(c), arg):
-                    okmsg("Renamed.")
-                else:
+                elif not _cid_key(c):
                     emsg("No conversation to rename — send a message first.")
+                else:
+                    try:
+                        if c.rename_chat(_cid_key(c), arg):
+                            conv_title = arg
+                            okmsg("Renamed.")
+                        else:
+                            emsg("No conversation to rename — send a message first.")
+                    except deepseek_client.DeepSeekError as e:
+                        emsg(str(e))
             elif cmd == "del":
                 if not arg:
                     emsg("usage: /del <chat_id>")
-                elif c.delete_chat(arg):
-                    okmsg("Deleted.")
                 else:
-                    emsg(f"Conversation {arg} not found.")
+                    try:
+                        if c.delete_chat(arg):
+                            if arg == _cid_key(c):
+                                conv_title = ""
+                            okmsg("Deleted.")
+                        else:
+                            emsg(f"Conversation {arg} not found.")
+                    except deepseek_client.DeepSeekError as e:
+                        emsg(str(e))
             elif cmd == "save":
                 # /save          -> export the current conversation to .md
                 # /save <path>   -> same, explicit path
@@ -1807,6 +1870,9 @@ def ds_repl(c, args):
         _offer_code_saves(user, ftx)
         if cid:
             dim(f"(conversation {_cid_key(c)})")
+        if not conv_title:
+            stored = c.get_chat(_cid_key(c)) or {}
+            conv_title = stored.get("title") or ""
 
 
 def _cid_key(c):
@@ -1840,6 +1906,7 @@ Commands:
   /files           list attached files
   /clearfiles      clear attached files
   /new             start a fresh conversation
+  /multi           toggle multiline input (end with a blank line)
   /status          account + tokens used this session
   /history         list saved conversations
   /use <id>        resume a saved conversation
@@ -1882,19 +1949,28 @@ def _run_shell(cmd):
         dim(f"exit code: {proc.returncode}")
 
 
-def repl(client):
+def repl(client, init_title=""):
     init_readline()
     title = f"Qwen Chat — {client.model}"
     cprint(Panel.fit(title, border_style="cyan"))
     dim("Type /help for commands, /exit to quit.")
     transcript: list[tuple[str, str]] = []
+    conv_title = init_title
+    multiline = False
 
     while True:
-        try:
-            user = input("\n[You] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
+        if conv_title:
+            prompt = f"\n[{client.model}|{conv_title}] "
+        else:
+            prompt = f"\n[{client.model}] "
+        if multiline:
+            user = _input_multiline(prompt).strip()
+        else:
+            try:
+                user = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
         if not user:
             continue
 
@@ -1907,6 +1983,10 @@ def repl(client):
             arg = arg.strip()
             if cmd in ("exit", "quit"):
                 break
+            elif cmd == "multi":
+                multiline = not multiline
+                okmsg(f"Multiline input {'on' if multiline else 'off'} — "
+                      f"{'end with a blank line.' if multiline else ''}")
             elif cmd == "help":
                 _repl_help()
             elif cmd == "model":
@@ -1938,6 +2018,7 @@ def repl(client):
                 okmsg("Cleared attachments.")
             elif cmd == "new":
                 client.new_chat()
+                conv_title = ""
                 okmsg(f"New conversation: {client._chat_id}")
             elif cmd == "status":
                 cmd_status(argparse.Namespace())
@@ -1950,6 +2031,7 @@ def repl(client):
                     continue
                 try:
                     data = client.use_chat(arg)
+                    conv_title = data.get("title") or ""
                     okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
                 except QwenError as e:
                     emsg(str(e))
@@ -1987,6 +2069,7 @@ def repl(client):
                     emsg("usage: /rename <title>")
                 elif client._chat_id:
                     client.rename_chat(client._chat_id, arg)
+                    conv_title = arg
                     okmsg("Renamed.")
                 else:
                     emsg("No conversation yet — send a message first.")
@@ -2057,6 +2140,12 @@ def repl(client):
         transcript.append(("assistant", full))
         if usage:
             dim(f"({usage.get('total_tokens', '?')} tokens | chat {chat_id or 'new'})")
+        if not conv_title and client._chat_id:
+            try:
+                cur = client.get_chat(client._chat_id)
+                conv_title = (cur or {}).get("title") or ""
+            except QwenError:
+                conv_title = ""
         _offer_code_saves(user, full)
 
 
@@ -2069,6 +2158,7 @@ def _offer_code_saves(user, full):
         lang = b["lang"]
         code = b["content"]
         fname = b["filename"] or f"block{i}.{_lang_ext(lang)}"
+        _preview_block(i, b, fname)
         try:
             inp = input(f"  save block {i} as [{fname}]? (enter=save, 'n'=skip): ")
         except EOFError:
@@ -2370,7 +2460,7 @@ def main():
     # DeepSeek via the local Deepseek-API proxy (`python app.py` in Deepseek-API/).
     p_ds = sub.add_parser("ds", help="talk to DeepSeek via the local proxy")
     p_ds.add_argument("sub", nargs="?", default="ask",
-                      help="action: ask, chat, models, history, new, use, del ")
+                      help="action: ask, chat, models, history, sync, new, use, del ")
     p_ds.add_argument("rest", nargs="*", default=[],
                       help="chat id (for use/del) or your question (for ask)")
     p_ds.add_argument("-m", "--model", default=None,
