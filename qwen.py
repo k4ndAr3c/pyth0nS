@@ -37,7 +37,7 @@ Interactive REPL commands:
   /use <id>       resume a saved conversation
   /rename <title> rename the current conversation
   /del <id>       delete a saved conversation
-  /save <path>    save transcript to a file
+  /save <path>    save transcript to a file (.md) — /save <id> [path] exports a stored chat
   /token          show stored token (masked)
   /exit           quit
 """
@@ -60,6 +60,11 @@ from getpass import getpass
 from pathlib import Path
 
 import requests
+
+try:
+    import deepseek_client
+except ImportError:
+    deepseek_client = None
 
 BASE_URL = os.environ.get("QWEN_BASE_URL", "https://chat.qwen.ai")
 API = f"{BASE_URL}/api"
@@ -777,7 +782,14 @@ class QwenClient:
 
     def list_chats(self, page=1):
         r = self._request("GET", "/v2/chats", base=API)
-        return r.json().get("data", [])
+        data = r.json().get("data", []) or []
+        chats = []
+        for item in data:
+            if isinstance(item, str):
+                chats.append({"id": item})
+            elif isinstance(item, dict):
+                chats.append(item)
+        return chats
 
     def new_chat(self, title=""):
         # Legacy v1 endpoint is retired; v2 create is used instead.
@@ -895,8 +907,10 @@ class QwenClient:
         return [m.get("id") for m in data if m.get("is_active", True)]
 
     def account_quota(self):
+        # retries=1 so a flaky server 500 fails fast (~1s) instead of a
+        # ~10s multi-retry stall in /status.
         r = self._request("POST", "/users/user/entitlement_quota",
-                          json={"features": []})
+                          json={"features": []}, retries=1)
         return r.json().get("data", {})
 
     def logout(self):
@@ -923,10 +937,20 @@ def login_with_browser(timeout: float = 300.0):
     except Exception:
         raise QwenError("Playwright is not installed (pip install playwright).")
     import shutil
-    exe = shutil.which("chromium") or shutil.which("chromium-browser")
-    if not exe:
-        raise QwenError("No chromium/chromium-browser found on PATH.")
-    print(f"Opening Chromium ({exe})…")
+
+    def _find_chromium():
+        """Return a usable Chromium binary: a system one on PATH, else Playwright's
+        bundled copy. Empty string means none found."""
+        for name in ("chromium", "chromium-browser",
+                     "google-chrome", "google-chrome-stable",
+                     "google-chrome-unstable", "chrome"):
+            exe = shutil.which(name)
+            if exe:
+                return exe
+        return ""
+
+    print("Opening browser…")
+    exe = _find_chromium()
     token = ""
     captured = []
 
@@ -970,12 +994,35 @@ def login_with_browser(timeout: float = 300.0):
             pass
 
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            str(CONFIG_DIR / "profile"),
-            executable_path=exe, headless=False,
-            ignore_https_errors=True,
-            args=["--no-sandbox"],
-        )
+        kwargs = dict(headless=False, ignore_https_errors=True,
+                      args=["--no-sandbox"])
+        if exe:
+            kwargs["executable_path"] = exe
+        try:
+            ctx = p.chromium.launch_persistent_context(
+                str(CONFIG_DIR / "profile"), **kwargs)
+        except Exception:
+            # No system browser or it failed to launch — fall back to
+            # Playwright's bundled Chromium (if installed), else guide install.
+            if exe:
+                kwargs.pop("executable_path", None)
+                try:
+                    ctx = p.chromium.launch_persistent_context(
+                        str(CONFIG_DIR / "profile"), **kwargs)
+                except Exception:
+                    raise QwenError(
+                        "Could not launch a Chromium browser.\n"
+                        "Install one with either:\n"
+                        "  pip install playwright && playwright install chromium\n"
+                        "or a system package:\n"
+                        "  apt install chromium   (or google-chrome)")
+            else:
+                raise QwenError(
+                    "Could not launch a Chromium browser.\n"
+                    "Install one with either:\n"
+                    "  pip install playwright && playwright install chromium\n"
+                    "or a system package:\n"
+                    "  apt install chromium   (or google-chrome)")
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.on("response", _record)
         try:
@@ -1153,9 +1200,49 @@ def cmd_status(args):
     try:
         quota = c.account_quota()
     except QwenError as e:
-        warn(f"Quota unavailable: {e}")
+        dim(f"Quota unavailable ({e}).")
         return
+    if _quota_exhausted(quota):
+        warn("Chat quota reached or exceeded — you may not be able to start new "
+             "conversations. Check your plan or top up.")
     _print_quota(quota)
+
+
+def _quota_exhausted(quota):
+    """Best-effort detection that the user has run out of chat quota."""
+    if not isinstance(quota, dict):
+        return False
+    qp = quota.get("quota_plan") or quota.get("quota") or quota
+    if not isinstance(qp, dict):
+        return False
+    remaining = None
+    for key in ("remaining", "remaining_tokens", "remained_quota"):
+        val = qp.get(key)
+        if val is not None:
+            remaining = val
+            break
+    if remaining is not None:
+        return int(remaining) <= 0
+    total = None
+    for key in ("total_quota", "totalTokens", "total_tokens", "quota_volume"):
+        val = qp.get(key)
+        if val is not None:
+            total = val
+            break
+    used = None
+    for key in ("used_quota", "usedTokens", "used_tokens", "used"):
+        val = qp.get(key)
+        if val is not None:
+            used = val
+            break
+    if total is not None and used is not None:
+        return int(used) >= int(total)
+    # Last resort (some plans expose an absolute remaining number).
+    for key in ("left", "left_quota", "available", "free_quota"):
+        val = qp.get(key)
+        if val is not None:
+            return int(val) <= 0
+    return False
 
 
 def _print_quota(quota):
@@ -1263,6 +1350,51 @@ def _print_msg(text, limit):
         return
 
 
+def _offer_chat_code_saves(chat_id, data):
+    """Offer to save every code block in a Qwen conversation (used by /view
+    and /print full). Shares the same prompt style as the DS offer."""
+    msgs = data.get("chat", {}).get("messages", [])
+    blocks = []
+    for m in msgs:
+        if m.get("role") == "assistant":
+            blocks.extend(_extract_code_blocks(_msg_answer(m)))
+    if not blocks:
+        return
+    sess_dir = os.path.join(os.getcwd(), chat_id)
+    os.makedirs(sess_dir, exist_ok=True)
+    cprint(f"\n[bold yellow]>>> {len(blocks)} code block(s) in this session"
+           f" — saving to {sess_dir}[/bold yellow]")
+    for i, b in enumerate(blocks, 1):
+        default = b["filename"] or f"block_{i}.{_lang_ext(b['lang'])}"
+        _preview_block(i, b, default)
+        try:
+            inp = input(f"  save block {i} as [{default}]? "
+                        f"(Enter=save, 'n'=skip, '/'=skip, or path): ")
+        except EOFError:
+            break
+        except KeyboardInterrupt:
+            print()
+            dim("skipped the rest")
+            break
+        s = inp.strip()
+        if s.lower() in ("n", "no"):
+            continue
+        if not s:
+            path = os.path.join(sess_dir, default)
+        elif os.path.isabs(s):
+            path = s
+        elif s.startswith("/"):
+            path = s
+        else:
+            path = os.path.join(sess_dir, s)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(b["content"])
+            okmsg(f"  saved -> {os.path.abspath(path)}")
+        except OSError as ex:
+            emsg(f"  could not write {path}: {ex}")
+
+
 def cmd_view(args):
     c = QwenClient()
     try:
@@ -1274,41 +1406,7 @@ def cmd_view(args):
         emsg(f"Conversation {args.chat_id} not found.")
         return
     _print_conversation(data, getattr(args, "full", False))
-    msgs = data.get("chat", {}).get("messages", [])
-    blocks = []
-    for m in msgs:
-        if m.get("role") == "assistant":
-            blocks.extend(_extract_code_blocks(_msg_answer(m)))
-    if blocks:
-        sess_dir = os.path.join(os.getcwd(), args.chat_id)
-        os.makedirs(sess_dir, exist_ok=True)
-        cprint(f"\n[bold yellow]>>> {len(blocks)} code block(s) in this session"
-               f" — saving to {sess_dir}[/bold yellow]")
-        for i, b in enumerate(blocks, 1):
-            default = b["filename"] or f"block_{i}.{_lang_ext(b['lang'])}"
-            _preview_block(i, b, default)
-            try:
-                inp = input(f"  save block {i} as [{default}]? "
-                            f"(Enter=save, 'n'=skip, '/'=skip, or path): ")
-            except EOFError:
-                break
-            s = inp.strip()
-            if s.lower() in ("n", "no"):
-                continue
-            if not s:
-                path = os.path.join(sess_dir, default)
-            elif os.path.isabs(s):
-                path = s
-            elif s.startswith("/"):
-                path = s
-            else:
-                path = os.path.join(sess_dir, s)
-            try:
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(b["content"])
-                okmsg(f"  saved -> {os.path.abspath(path)}")
-            except OSError as ex:
-                emsg(f"  could not write {path}: {ex}")
+    _offer_chat_code_saves(args.chat_id, data)
     dim("\nResume from REPL with /use, or `qwen.py use <id>`")
 
 
@@ -1391,9 +1489,7 @@ def _usage_line(usage, chat_id):
 def cmd_ds(args):
     """Talk to DeepSeek through the local Deepseek-API proxy (`python app.py`
     inside the Deepseek-API/ repo, which speaks OpenAI at :8000/v1)."""
-    try:
-        import deepseek_client
-    except ImportError:
+    if deepseek_client is None:
         emsg("deepseek_client module not found next to qwen.py.")
         return
     base = args.base_url or None
@@ -1459,9 +1555,10 @@ Commands:
   /print [full]    print current or given conversation (short unless 'full')
   /rename <title>  rename current conversation
   /del <id>        delete a saved conversation
-  /save <path>     save this transcript to a file
+  /save <path>     export this chat to .md — /save <id> [path] exports a stored chat
   /token           show the proxy address in use
   /exit, /quit     leave
+ !<cmd>            run a shell command
 Anything else is sent to DeepSeek via the local proxy.
 Links appearing in replies are listed automatically below the answer.
 """)
@@ -1481,6 +1578,10 @@ def ds_repl(c, args):
             print()
             break
         if not user:
+            continue
+
+        if user.startswith("!"):
+            _run_shell(user[1:].strip())
             continue
 
         if user.startswith("/"):
@@ -1590,9 +1691,35 @@ def ds_repl(c, args):
                 else:
                     emsg(f"Conversation {arg} not found.")
             elif cmd == "save":
-                path = arg or f"deepseek-transcript-{time.strftime('%Y%m%d-%H%M%S')}.md"
-                _save_transcript([(m["role"], m["content"]) for m in c.log], path)
-                okmsg(f"Saved to {path}")
+                # /save          -> export the current conversation to .md
+                # /save <path>   -> same, explicit path
+                # /save <id> [path] -> export a stored conversation to .md
+                save_parts = arg.split()
+                if save_parts and not save_parts[0].startswith(("/", ".")) and c.get_chat(save_parts[0]):
+                    chat_id = save_parts[0]
+                    path = save_parts[1] if len(save_parts) > 1 else f"{chat_id}.md"
+                    chat = c.get_chat(chat_id)
+                    title = chat.get("title") or chat_id
+                    doc = _conversation_to_md(title, chat.get("messages") or [],
+                                              lambda m: m.get("content") or "")
+                    _save_md(path, doc)
+                    okmsg(f"Saved conversation {chat_id} to {path}")
+                else:
+                    # No explicit chat id: prefer the live conversation (fetch
+                    # the full stored chat we've resumed/created) over c.log,
+                    # which stays empty after /use.
+                    path = arg or f"deepseek-transcript-{time.strftime('%Y%m%d-%H%M%S')}.md"
+                    cur = c.get_chat(c.conversation_id or "") if c.conversation_id else None
+                    msgs = (cur or {}).get("messages") or []
+                    if msgs:
+                        title = (cur or {}).get("title") or c.conversation_id
+                        doc = _conversation_to_md(title, msgs,
+                                                  lambda m: m.get("content") or "")
+                        _save_md(path, doc)
+                        okmsg(f"Saved conversation {c.conversation_id} to {path}")
+                    else:
+                        _save_transcript([(m["role"], m["content"]) for m in c.log], path)
+                        okmsg(f"Saved to {path}")
             elif cmd == "token":
                 dim(f"Proxy: {c.base_url}")
             else:
@@ -1656,11 +1783,39 @@ Commands:
   /print [full]    print current or given conversation (truncated unless 'full')
   /rename <title>  rename current conversation
   /del <id>        delete a conversation
-  /save <path>     save transcript to file
+  /save <path>     export conversation to .md — /save <id> [path] exports a stored chat
   /token           show stored token (masked)
   /exit, /quit     leave
+ !<cmd>            run a shell command
 Anything else is sent to Qwen. Enter a blank line to start over.
 """)
+
+
+def _run_shell(cmd):
+    """Run a shell command from a REPL line prefixed with '!'. Streams
+    stdout/stderr live and shows the exit status when non-zero."""
+    import subprocess
+    try:
+        proc = subprocess.Popen(cmd, shell=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+    except OSError as e:
+        emsg(f"could not start shell: {e}")
+        return
+    try:
+        for line in proc.stdout:
+            print(line, end="")
+        proc.wait()
+    except KeyboardInterrupt:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        print()
+        dim("interrupted")
+    if proc.returncode:
+        dim(f"exit code: {proc.returncode}")
 
 
 def repl(client):
@@ -1677,6 +1832,10 @@ def repl(client):
             print()
             break
         if not user:
+            continue
+
+        if user.startswith("!"):
+            _run_shell(user[1:].strip())
             continue
 
         if user.startswith("/"):
@@ -1757,6 +1916,8 @@ def repl(client):
                     emsg(f"Conversation {cid} not found.")
                     continue
                 _print_conversation(data, full)
+                if full:
+                    _offer_chat_code_saves(cid, data)
             elif cmd == "rename":
                 if not arg:
                     emsg("usage: /rename <title>")
@@ -1772,9 +1933,48 @@ def repl(client):
                     client.delete_chat(arg)
                     okmsg("Deleted.")
             elif cmd == "save":
-                path = arg or f"qwen-transcript-{time.strftime('%Y%m%d-%H%M%S')}.md"
-                _save_transcript(transcript, path)
-                okmsg(f"Saved to {path}")
+                # /save          -> export the current conversation to .md
+                # /save <path>   -> same, explicit path
+                # /save <id> [path] -> export a stored conversation to .md
+                save_parts = arg.split()
+                saved_chat = None
+                if save_parts:
+                    try:
+                        saved_chat = client.get_chat(save_parts[0])
+                    except QwenError:
+                        saved_chat = None
+                if saved_chat and saved_chat.get("id"):
+                    chat_id = save_parts[0]
+                    path = save_parts[1] if len(save_parts) > 1 else f"{chat_id}.md"
+                    title = saved_chat.get("title") or chat_id
+                    msgs = saved_chat.get("chat", {}).get("messages", [])
+                    doc = _conversation_to_md(title, msgs, _msg_answer)
+                    _save_md(path, doc)
+                    okmsg(f"Saved conversation {chat_id} to {path}")
+                else:
+                    # No explicit chat id: prefer the live conversation (fetch
+                    # the full stored chat when we've resumed/created one) over
+                    # the in-memory transcript, which stays empty after /use.
+                    path = arg or f"qwen-transcript-{time.strftime('%Y%m%d-%H%M%S')}.md"
+                    cur = None
+                    if client._chat_id:
+                        try:
+                            cur = client.get_chat(client._chat_id)
+                        except QwenError:
+                            cur = None
+                    if cur and cur.get("id"):
+                        title = cur.get("title") or client._chat_id
+                        msgs = cur.get("chat", {}).get("messages", [])
+                        if msgs:
+                            doc = _conversation_to_md(title, msgs, _msg_answer)
+                            _save_md(path, doc)
+                            okmsg(f"Saved conversation {client._chat_id} to {path}")
+                        else:
+                            _save_transcript(transcript, path)
+                            okmsg(f"Saved to {path}")
+                    else:
+                        _save_transcript(transcript, path)
+                        okmsg(f"Saved to {path}")
             elif cmd == "token":
                 cmd_token(argparse.Namespace())
             else:
@@ -1808,6 +2008,10 @@ def _offer_code_saves(user, full):
         try:
             inp = input(f"  save block {i} as [{fname}]? (enter=save, 'n'=skip): ")
         except EOFError:
+            return
+        except KeyboardInterrupt:
+            print()
+            dim("skipped the rest")
             return
         s = inp.strip()
         if s.lower() in ("n", "no", "q"):
@@ -1845,6 +2049,10 @@ def _offer_ds_code_saves(c, chat_id):
                         f"(Enter=save, 'n'=skip, or path): ")
         except EOFError:
             break
+        except KeyboardInterrupt:
+            print()
+            dim("skipped the rest")
+            break
         s = inp.strip()
         if s.lower() in ("n", "no"):
             continue
@@ -1872,27 +2080,96 @@ def _preview_block(i, b, default):
     if total > 8:
         dim(f"      ... {total - 8} more line(s)")
 
+# Language name → file extension, and the set of file extensions we treat as
+# code for caption/filename detection. Kept broad so any common language a
+# reply might fence (ps1, rb, pl, kt, swift, rs, lua, go, ...) gets a matching
+# save name instead of blockN.<ext>.
+_LANG_TO_EXT = {
+    "python": "py", "python3": "py", "py": "py", "bash": "sh", "shell": "sh",
+    "sh": "sh", "zsh": "zsh", "powershell": "ps1", "ps1": "ps1", "pwsh": "ps1",
+    "cmd": "cmd", "batch": "bat", "bat": "bat", "javascript": "js", "js": "js",
+    "node": "js", "typescript": "ts", "ts": "ts", "html": "html", "htm": "html",
+    "css": "css", "json": "json", "json5": "json5", "sql": "sql", "yaml": "yml",
+    "yml": "yml", "jinja2": "j2", "jinja": "j2", "ruby": "rb", "rb": "rb",
+    "go": "go", "golang": "go", "rust": "rs", "rs": "rs", "java": "java",
+    "kotlin": "kt", "kt": "kt", "c": "c", "h": "h", "cpp": "cpp", "c++": "cpp",
+    "cxx": "cpp", "cc": "cc", "hpp": "hpp", "csharp": "cs", "cs": "cs",
+    "fsharp": "fs", "fs": "fs", "php": "php", "lua": "lua", "perl": "pl",
+    "pl": "pl", "r": "r", "swift": "swift", "objective-c": "m", "objc": "m",
+    "m": "m", "scala": "scala", "scala3": "scala", "dart": "dart",
+    "elixir": "ex", "ex": "ex", "exs": "exs", "erlang": "erl", "erl": "erl",
+    "clojure": "clj", "clj": "clj", "haskell": "hs", "hs": "hs", "ml": "ml",
+    "ocaml": "ml", "v": "v", "zig": "zig", "nim": "nim", "r": "r",
+    "smali": "smali", "assembly": "asm", "asm": "asm", "s": "s",
+    "vb": "vb", "vb.net": "vb", "visualbasic": "vb", "powershell_ps1": "ps1",
+    "dockerfile": "Dockerfile", "makefile": "mk", "make": "mk",
+    "markdown": "md", "md": "md", "text": "txt", "txt": "txt",
+    "xml": "xml", "svg": "svg", "toml": "toml", "ini": "ini", "env": "env",
+}
+
+# Extensions we treat as savable code/script files for caption-detection.
+_CODE_EXTS = ("py", "sh", "zsh", "bash", "ps1", "psm1", "rb", "pl", "pm",
+              "js", "jsx", "ts", "tsx", "html", "htm", "css", "scss", "json",
+              "json5", "sql", "yml", "yaml", "j2", "jinja", "go", "rs", "java",
+              "kt", "kts", "c", "h", "cpp", "cc", "cxx", "hpp", "cs", "fs",
+              "php", "lua", "pl", "r", "swift", "m", "scala", "dart", "groovy",
+              "clj", "cljs", "el", "elm", "ex", "exs", "erl", "lfe", "hs",
+              "ml", "v", "zig", "nim", "smali", "asm", "s", "vb", "vbnet",
+              "bat", "psh", "fish", "coffee", "tsx", "vue", "svelte", "rbw",
+              "gemspec", "rake", "erb", "haml", "slim", "ipynb", "tf", "hcl",
+              "tfvars", "proto", "graphql", "gql", "md", "markdown", "rst",
+              "adoc", "tex", "txt", "log", "xml", "svg", "toml", "ini", "cfg",
+              "conf", "env", "properties", "dockerfile", "make", "mk", "cmake",
+              "pyc", "wasm")
+
+
 def _lang_ext(lang):
-    return {"python": "py", "python3": "py", "bash": "sh", "shell": "sh",
-            "sh": "sh", "javascript": "js", "typescript": "ts", "html": "html",
-            "css": "css", "json": "json", "sql": "sql", "yaml": "yml",
-            "ruby": "rb", "go": "go", "rust": "rs", "java": "java",
-            "c": "c", "cpp": "cpp", "c++": "cpp",
-            }.get(lang.lower(), lang.lower() or "txt")
+    return _LANG_TO_EXT.get(lang.lower(), lang.lower() or "txt")
+
+
+def _caption_filename(before):
+    probe = before.rstrip()
+    if "\n" in probe:
+        probe = probe.rsplit("\n", 1)[-1]
+        if probe.strip().startswith("```"):
+            probe = probe.rsplit("\n", 1)[-1]
+    ext_alt = "|".join(_CODE_EXTS)
+    for m in re.finditer(rf"`([A-Za-z0-9_.-]+\.(?:{ext_alt}))`", probe, re.I):
+        return m.group(1)
+    for m in re.finditer(rf"[\w./-]+\.(?:{ext_alt})\b", probe, re.I):
+        return m.group(0)
+    return ""
+
+
+_KNOWN_LANGS = set(_LANG_TO_EXT) | {
+    "json5", "shell", "bash", "zsh", "golang", "objc", "objective-c",
+    "visualbasic", "vb.net", "scala3", "markdown", "jinja", "jinja2",
+}
+
+_EXT_RE = re.compile(r"^[\w./-]+\.(?P<ext>[A-Za-z0-9]{1,10})$")
 
 
 def _extract_code_blocks(text):
     blocks = []
     pat = re.compile(r"```([^\n]*)\n(.*?)```", re.S)
     for m in pat.finditer(text):
-        meta = m.group(1).strip()
+        words = m.group(1).strip().split()
         lang = ""
         fname = ""
-        for word in meta.split():
-            if not lang and re.fullmatch(r"[A-Za-z0-9_+\-#.]+", word):
-                lang = word
-                if "." in word and len(word) <= 96:
-                    fname = word
+        for w in words:
+            wl = w.lower()
+            if not lang and wl in _KNOWN_LANGS:
+                lang = wl
+                continue
+            if not fname and _EXT_RE.match(w) and len(w) <= 96:
+                fname = w
+        # No filename token found: if the first word itself looks like a file
+        # (e.g. ```greet.py), treat it as the filename and derive the language
+        # from its extension.
+        if not fname and words and _EXT_RE.match(words[0]):
+            fname = words[0]
+        if not lang and words and _EXT_RE.match(words[0]):
+            lang = _EXT_RE.match(words[0]).group("ext").lower()
         if not fname:
             fname = _caption_filename(text[:m.start()])
         blocks.append({"lang": lang or "txt", "filename": fname,
@@ -1955,24 +2232,35 @@ def _show_links(text):
         cprint(f"  {i}. {line}" if _RICH else f"  {i}. {line}")
 
 
-def _caption_filename(before):
-    probe = before.rstrip()
-    if "\n" in probe:
-        probe = probe.rsplit("\n", 1)[-1]
-        if probe.strip().startswith("```"):
-            probe = probe.rsplit("\n", 1)[-1]
-    for m in re.finditer(r"`([A-Za-z0-9_.-]+\.(?:py|sh|js|ts|html|css|json|sql|yml|yaml|rb|go|rs|java|c|cpp|md|txt))`", probe):
-        return m.group(1)
-    for m in re.finditer(r"[\w./-]+\.(?:py|sh|js|ts|html|css|json|sql|yml|yaml|rb|go|rs|java|c|cpp|md|txt)\b", probe):
-        return m.group(0)
-    return ""
+def _conversation_to_md(title, messages, render_text):
+    """Render a full conversation into a Markdown document.
+
+    messages: list of {"role": ..., ...} dicts; render_text(m) returns the
+    plain-text content for a message. Code fences inside the content are kept
+    as-is so they stay valid in the exported .md."""
+    parts = [f"# {title or 'Chat conversation'}"]
+    for m in messages:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = render_text(m)
+        if not text:
+            continue
+        name = "You" if role == "user" else "Assistant"
+        parts.append(f"\n## {name}\n\n{text}\n")
+    return "\n".join(parts)
+
+
+def _save_md(path, doc):
+    Path(path).write_text(doc, encoding="utf-8")
 
 
 def _save_transcript(transcript, path):
-    lines = [f"# Qwen transcript — {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}\n"]
-    for role, text in transcript:
-        lines.append(f"\n## {role.capitalize()}\n\n{text}\n")
-    Path(path).write_text("\n".join(lines))
+    """Legacy helper: export an in-memory (role, text) transcript to .md."""
+    title = f"Qwen transcript — {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}"
+    msgs = [{"role": role, "content": text} for role, text in transcript]
+    _save_md(path, _conversation_to_md(
+        title, msgs, lambda m: m.get("content") or ""))
 
 
 # --------------------------------------------------------------------------- #
