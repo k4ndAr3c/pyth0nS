@@ -14,9 +14,11 @@ that proxy — used by qwen.py's `ds` command:
     qwen.py ds new               # start a fresh conversation
     qwen.py ds use <chat_id>     # resume a saved conversation
     qwen.py ds del <chat_id>     # delete a saved conversation
+    qwen.py ds --upload f.pdf ask "summarise"   # attach a file
 
 It supports SSE streaming, model selection, DeepThink (`thinking`), web
-`search`, and multi-turn threads via the proxy's `conversation_id` field.
+`search`, file attachment (`/upload`, `--upload`, `ref_file_ids`), and
+multi-turn threads via the proxy's `conversation_id` field.
 """
 
 from __future__ import annotations
@@ -117,7 +119,8 @@ class DeepSeekSession:
         self.model = model
         self.conversation_id: str | None = None
         self._session = requests.Session()
-        self._session.headers.update({"Content-Type": "application/json"})
+        # No global Content-Type: requests sets application/json for `json=`
+        # bodies and the correct multipart boundary for `files=` uploads.
         if store_path is None:
             store_path = os.environ.get(
                 "DEEPSEEK_STORE",
@@ -129,6 +132,18 @@ class DeepSeekSession:
         # Set by list_chats()/sync_chats(): True when the online account could
         # be reached (so /history is online-authoritative), False on fallback.
         self.online_ok: bool = False
+        # Uploaded file references for the live thread (sent as ref_file_ids).
+        self.attachments: list[dict] = []
+        # File ids already handed to DeepSeek in an earlier message of this
+        # thread. A continuation must not re-send them (re-attaching a file to
+        # an existing node makes DeepSeek fork the conversation and reply
+        # empty), so only ids not in this set go on the wire.
+        self._sent_file_ids: set[str] = set()
+        # File ids staged for the current (not-yet-sent) message.
+        self._pending_refs: list[str] = []
+        # True once a message deliberately started a fresh branch (new file
+        # added to an already-started conversation); the REPL surfaces it.
+        self.forked: bool = False
 
     # -- low level -------------------------------------------------------- #
     def _url(self, path: str) -> str:
@@ -155,6 +170,106 @@ class DeepSeekSession:
         except (requests.RequestException, ValueError) as e:
             raise DeepSeekError(f"Could not list models: {e}")
 
+    def upload_file(self, path: str) -> dict:
+        """Upload a file through the proxy and attach it to this thread.
+
+        Returns the proxy's file info {id, file_name, file_size, status}. The
+        returned id is included in the next message's `ref_file_ids`, so call
+        this before `chat_once`/`stream_chat`.)
+        """
+        self._check_base()
+        import os
+        name = os.path.basename(path) or path
+        try:
+            f = open(path, "rb")
+        except OSError as e:
+            raise DeepSeekError(f"Could not read {path}: {e}")
+        try:
+            try:
+                r = self._session.post(
+                    self._url("/v1/files/upload"),
+                    files={"file": (name, f)}, timeout=120,
+                )
+            except requests.RequestException as e:
+                raise DeepSeekError(f"Upload request failed: {e}")
+        finally:
+            f.close()
+        if r.status_code != 200:
+            snippet = ""
+            try:
+                snippet = r.text[:200]
+            except Exception:
+                pass
+            # DeepSeek rejects file types it doesn't know (binaries, extensionless
+            # files, libc.so.6 ...). Renaming to .txt gets past the extension
+            # gate — the content itself is still read. Retry once.
+            if "unsupported file type" in snippet and not name.lower().endswith(".txt"):
+                return self._upload_as_txt(path)
+            raise DeepSeekError(f"Proxy upload error ({r.status_code}): {snippet}")
+        try:
+            data = r.json()
+            if "error" in data:
+                raise DeepSeekError(data["error"].get("message", "Unknown proxy error"))
+            info = {k: data.get(k) for k in ("id", "file_name", "file_size", "status")}
+        except ValueError:
+            raise DeepSeekError(f"Proxy returned non-JSON ({r.status_code}).")
+        self.attachments.append({
+            "id": info.get("id") or "",
+            "name": info.get("file_name") or name,
+            "size": info.get("file_size") or os.path.getsize(path),
+        })
+        return info
+
+    def _upload_as_txt(self, path: str) -> dict:
+        """Re-upload `path` under a `.txt` name after DeepSeek rejects its real
+        file type. Returns the same info dict as upload_file."""
+        import os
+        name = os.path.basename(path) or path
+        txt_name = name.rsplit(".", 1)[0] + ".txt" if "." in name else name + ".txt"
+        with open(path, "rb") as f:
+            try:
+                r = self._session.post(
+                    self._url("/v1/files/upload"),
+                    files={"file": (txt_name, f)}, timeout=120,
+                )
+            except requests.RequestException as e:
+                raise DeepSeekError(f"Upload request failed: {e}")
+        if r.status_code != 200:
+            snippet = ""
+            try:
+                snippet = r.text[:200]
+            except Exception:
+                pass
+            raise DeepSeekError(f"Proxy upload error ({r.status_code}): {snippet}")
+        data = r.json()
+        if "error" in data:
+            raise DeepSeekError(data["error"].get("message", "Unknown proxy error"))
+        info = {k: data.get(k) for k in ("id", "file_name", "file_size", "status")}
+        self.attachments.append({
+            "id": info.get("id") or "",
+            "name": info.get("file_name") or txt_name,
+            "size": info.get("file_size") or os.path.getsize(path),
+        })
+        return info
+
+    def _forking_refs(self) -> list[str]:
+        """New (not-yet-delivered) file ids for the next message."""
+        return [a["id"] for a in self.attachments
+                if a["id"] and a["id"] not in self._sent_file_ids]
+
+    def _fork_prompt(self, prompt: str) -> str:
+        """When a new file forces a fork mid-conversation, fold the prior
+        transcript into the prompt so the fresh thread keeps context."""
+        if not self.log:
+            return prompt
+        lines = []
+        for m in self.log:
+            role = "User" if m.get("role") == "user" else "Assistant"
+            lines.append(f"{role}: {m.get('content') or ''}")
+        lines.append(f"User: {prompt}")
+        lines.append("Assistant:")
+        return "\n\n".join(lines)
+
     def _body(self, prompt: str, *, thinking: bool, search: bool, stream: bool) -> dict:
         body = {
             "model": self.model,
@@ -163,9 +278,29 @@ class DeepSeekSession:
             "thinking": thinking,
             "search": search,
         }
+        refs = self._forking_refs()
+        if refs:
+            body["ref_file_ids"] = refs
         if self.conversation_id:
-            body["conversation_id"] = self.conversation_id
+            # A file attached to an ALREADY-STARTED thread makes chat.deepseek.com
+            # fork the conversation and reply on a different branch (our stream
+            # comes back empty). Attach it to a fresh thread instead, seeding the
+            # new branch with the prior transcript so nothing is lost.
+            if refs:
+                self.forked = True
+                body["messages"][0]["content"] = self._fork_prompt(prompt)
+                body.pop("conversation_id", None)
+            else:
+                body["conversation_id"] = self.conversation_id
+        self._pending_refs = list(refs)
         return body
+
+    def _mark_sent(self) -> None:
+        """Call after a message is successfully accepted so its file ids are
+        never re-attached to an existing node (which forks + replies empty)."""
+        if self._pending_refs:
+            self._sent_file_ids.update(self._pending_refs)
+            self._pending_refs = []
 
     # -- conversation persistence ------------------------------------------ #
     def _record(self, prompt: str, reply: str) -> None:
@@ -192,6 +327,9 @@ class DeepSeekSession:
     def new_conversation(self) -> None:
         self.conversation_id = None
         self.log = []
+        self.attachments = []
+        self._sent_file_ids = set()
+        self.forked = False
 
     def save_chat(self, title: str | None = None) -> str:
         """Persist the current thread under a title, returning its chat id."""
@@ -336,6 +474,9 @@ class DeepSeekSession:
         self.conversation_id = chat.get("conversation_id") or chat_id
         self.log = list(chat.get("messages") or [])
         self.model = chat.get("model") or self.model
+        self.attachments = []
+        self._sent_file_ids = set()
+        self.forked = False
         return chat
 
     def get_chat(self, chat_id: str) -> dict | None:
@@ -393,6 +534,7 @@ class DeepSeekSession:
         cid = data.get("conversation_id")
         if cid:
             self.conversation_id = cid
+        self._mark_sent()
         self._record(prompt, text)
         return text, cid, data.get("usage") or {}
 
@@ -447,6 +589,7 @@ class DeepSeekSession:
                     usage = evt["usage"]
         finally:
             r.close()
+        self._mark_sent()
         self._record(prompt, "".join(full))
         return "".join(full), self.conversation_id, usage
 

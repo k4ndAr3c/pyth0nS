@@ -61,11 +61,26 @@ from getpass import getpass
 from pathlib import Path
 
 import requests
+import subprocess
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 try:
     import deepseek_client
 except ImportError:
     deepseek_client = None
+
+try:
+    import sandbox
+except ImportError:
+    sandbox = None
+
+try:
+    import agent as agent_mod
+except ImportError:
+    agent_mod = None
 
 BASE_URL = os.environ.get("QWEN_BASE_URL", "https://chat.qwen.ai")
 API = f"{BASE_URL}/api"
@@ -161,8 +176,8 @@ def init_readline():
 
     _SLASH_COMMANDS = [
         "help", "model", "models", "upload", "files", "clearfiles", "new",
-        "status", "history", "use", "view", "print", "rename", "del", "save",
-        "token", "exit", "quit",
+        "status", "history", "use", "view", "print", "download", "rename",
+        "del", "save", "token", "exit", "quit",
     ]
 
     def _complete(text, state):
@@ -1477,6 +1492,121 @@ def _usage_line(usage, chat_id):
         dim(f"(chat {chat_id or 'new'})")
 
 
+def cmd_sandbox(args):
+    if sandbox is None:
+        emsg("sandbox.py not found next to qwen.py.")
+        return
+    if args.list:
+        p = sandbox.load_policy("policy.toml")
+        for line in p.describe():
+            print(f"  {line}")
+        return
+    report = sandbox.check("policy.toml")
+    cprint(f"backend:      {report['backend']}")
+    cprint(f"bwrap:        {'yes (' + report['bwrap_path'] + ')' if report['bwrap_path'] else 'no'}")
+    cprint(f"docker:       {'yes' if report['docker'] else 'no'}")
+    cprint(f"network:      {report['network_default']} (default)")
+    probe = report.get("probe")
+    if probe:
+        cprint(f"bwrap probe:  {probe}"
+               + (f" — {report.get('probe_detail')}" if report.get("probe_detail") else ""))
+    pol = report.get("policy")
+    cprint(f"policy:       {pol}" if pol else "policy:      not checked")
+    if report["backend"] == "restricted":
+        warn("restricted backend: no namespace isolation. Install bubblewrap:")
+        dim(sandbox.install_hint())
+
+
+def cmd_run(args):
+    if sandbox is None:
+        emsg("sandbox.py not importable next to qwen.py.")
+        return
+    if not args.run_args:
+        emsg("usage: qwen.py run <command...> [--net] [--timeout N]")
+        return
+    text = " ".join(args.run_args)
+    try:
+        argv = sandbox.parse(text)
+    except ValueError as e:
+        emsg(f"parse error: {e}")
+        return
+    try:
+        res = sandbox.run(
+            argv,
+            workspace=args.workspace, network=args.net,
+            timeout_s=args.timeout, max_out=args.max_out,
+            backend=args.sandbox,
+            approve=None,
+        )
+    except sandbox.SandboxError as e:
+        emsg(str(e))
+        return
+    except PermissionError as e:
+        emsg(f"not auto-approved (headless run only executes oracle commands): "
+             f"{e}")
+        return
+    _show_result(res)
+
+
+def _agent_progress(step, verdict, argv, feedback):
+    print()
+    warn(f"[step {step}] {verdict}: {sandbox.cmdline(argv)}")
+    print(feedback.rstrip()[:1000])
+    if len(feedback) > 1000:
+        dim(f"… (truncated preview; full output sent to model)")
+
+
+def cmd_agent(args):
+    """Autonomous sandboxed agent loop: qwen.py agent <task...>"""
+    if agent_mod is None:
+        emsg("agent.py not found next to qwen.py.")
+        return
+    if not args.task:
+        emsg("usage: qwen.py agent <task...> [--tier oracle|mutator|interpreter]")
+        return
+    task = " ".join(args.task)
+    client = QwenClient()
+    if not client.token:
+        emsg("Not logged in. Run `qwen.py login` first.")
+        return
+    try:
+        client.new_chat()
+        okmsg(f"Agent session: chat {client._chat_id}")
+    except QwenError as e:
+        emsg(f"could not start chat: {e}")
+        return
+    try:
+        res = agent_mod.agent_loop(
+            client,
+            task,
+            tier=args.tier,
+            workspace=args.workspace or os.getcwd(),
+            workspace_ro=args.workspace_ro,
+            max_steps=args.steps,
+            timeout_s=args.timeout,
+            max_out=args.max_out,
+            backend=args.sandbox,
+            interactive=True,
+            allow_interpreters=args.allow_interpreters,
+            on_result=_agent_progress,
+            log_path=args.log,
+        )
+    except agent_mod.AgentError as e:
+        emsg(str(e))
+        return
+    print()
+    if res["status"] == "done":
+        okmsg(f"Done in {res['steps']} steps ({res['duration']}s)")
+        if res["summary"]:
+            dim(f"summary: {res['summary']}")
+    else:
+        warn(f"Reached the step cap ({res['steps']} steps) without ```done```.")
+    if res.get("usage"):
+        dim("tokens: " + str(res["usage"].get("total_tokens", "?")))
+    if args.log:
+        okmsg(f"log: {args.log}")
+
+
 def cmd_ds(args):
     """Talk to DeepSeek through the local Deepseek-API proxy (`python app.py`
     inside the Deepseek-API/ repo, which speaks OpenAI at :8000/v1)."""
@@ -1489,6 +1619,15 @@ def cmd_ds(args):
         import os
         os.environ["DEEPSEEK_BASE_URL"] = base
     c = deepseek_client.DeepSeekSession(model=model)
+
+    # Attach any --upload files before a conversation starts (ask/chat/use).
+    if getattr(args, "upload", None) and args.sub in ("ask", "chat", "use"):
+        for path in args.upload:
+            try:
+                info = c.upload_file(path)
+                okmsg(f"Attached {path} → {info.get('id', '?')}")
+            except deepseek_client.DeepSeekError as e:
+                emsg(str(e))
 
     if args.sub == "models":
         try:
@@ -1611,6 +1750,9 @@ Commands:
   /help            this help
   /model <name>    switch model (deepseek-chat Instant / deepseek-expert Expert)
   /models          list available models
+  /upload <path>   attach a file (repeatable)
+  /files           list files attached to this session
+  /clearfiles      drop all attached files
   /new             start a fresh conversation
   /multi           toggle multiline input (end with a blank line)
   /status          current model + conversation
@@ -1619,13 +1761,15 @@ Commands:
   /sync            refresh from online: prune deleted, add missing, fix titles
   /use <id>        resume a saved conversation
   /view <id>       print a conversation + offer to save code blocks
+  /download        save the code blocks from the last reply (or /download <id>)
   /print [full]    print current or given conversation (short unless 'full')
   /rename <title>  rename current conversation
   /del <id>        delete a saved conversation
   /save <path>     export this chat to .md — /save <id> [path] exports a stored chat
   /token           show the proxy address in use
+  /run <cmd> [--net] [--timeout N] run sandboxed and feed result to the model
   /exit, /quit     leave
- !<cmd>            run a shell command
+  !<cmd>            run locally in your shell (no sandbox, no policy)
 Anything else is sent to DeepSeek via the local proxy.
 Links appearing in replies are listed automatically below the answer.
 """)
@@ -1659,6 +1803,7 @@ def ds_repl(c, args, init_title=""):
 
     conv_title = init_title
     multiline = False
+    last_reply = ""
     while True:
         if conv_title:
             prompt = f"\n[{c.model}|{conv_title}] "
@@ -1707,6 +1852,30 @@ def ds_repl(c, args, init_title=""):
                         cprint(m)
                 except deepseek_client.DeepSeekError as e:
                     emsg(str(e))
+            elif cmd == "upload":
+                if not arg:
+                    emsg("usage: /upload <path>")
+                    continue
+                try:
+                    info = c.upload_file(arg)
+                    fname = info.get("file_name") or arg
+                    note = f"  (uploaded as {fname})" if fname != arg else ""
+                    okmsg(f"Attached {arg} → {info.get('id', '?')}{note}")
+                    if c.conversation_id:
+                        dim("This conversation has already started — sending the "
+                            "next message will start a new forked thread seeded "
+                            "with this file.")
+                except deepseek_client.DeepSeekError as e:
+                    emsg(str(e))
+            elif cmd == "files":
+                if not c.attachments:
+                    dim("No files attached.")
+                else:
+                    for a in c.attachments:
+                        print(f"  {a['id']}  {a['name']}  ({a['size']} B)")
+            elif cmd == "clearfiles":
+                c.attachments.clear()
+                okmsg("Cleared attachments.")
             elif cmd == "think":
                 # toggle DeepThink in-session; ask/chat default off.
                 args.thinking = not args.thinking
@@ -1790,6 +1959,23 @@ def ds_repl(c, args, init_title=""):
                     continue
                 _print_ds_chat(chat, True)
                 _offer_ds_code_saves(c, cid)
+            elif cmd == "download":
+                # /download          -> save code blocks from the last reply
+                # /download <id>     -> save every code block in a chat
+                if arg:
+                    cid = arg
+                    chat = c.get_chat(cid)
+                    if not chat:
+                        emsg(f"Conversation {cid} not found.")
+                        continue
+                    label = f"ds-{cid}"
+                    blocks = _dl_chat_blocks(chat, lambda m: m.get("content") or "")
+                    _offer_download_blocks(label, blocks)
+                elif last_reply:
+                    label = f"ds-{_cid_key(c)}" if _cid_key(c) else "ds-live"
+                    _offer_download_blocks(label, _dl_blocks_text(last_reply))
+                else:
+                    emsg("No reply yet. Send a message or use /download <chat_id>.")
             elif cmd == "rename":
                 if not arg:
                     emsg("usage: /rename <title>")
@@ -1849,6 +2035,63 @@ def ds_repl(c, args, init_title=""):
                         okmsg(f"Saved to {path}")
             elif cmd == "token":
                 dim(f"Proxy: {c.base_url}")
+            elif cmd == "run":
+                if not arg:
+                    emsg("usage: /run <cmd> [--net] [--timeout N]")
+                    continue
+                if sandbox is None:
+                    emsg("sandbox.py not available — cannot /run")
+                    continue
+                network = False
+                timeout_s = sandbox.DEFAULT_TIMEOUT
+                tokens = arg.split()
+                kept = []
+                i = 0
+                while i < len(tokens):
+                    t = tokens[i]
+                    if t == "--net":
+                        network = True
+                    elif t == "--timeout":
+                        try:
+                            timeout_s = int(tokens[i + 1])
+                            i += 1
+                        except (IndexError, ValueError):
+                            emsg("--timeout needs a number")
+                            timeout_s = sandbox.DEFAULT_TIMEOUT
+                    else:
+                        kept.append(t)
+                    i += 1
+                cmd_text = " ".join(kept).strip()
+                if not cmd_text:
+                    emsg("usage: /run <cmd> [--net] [--timeout N]")
+                    continue
+                status, feed = _run_cmd_feed(
+                    cmd_text, workspace=os.getcwd(), network=network,
+                    timeout_s=timeout_s)
+                if status == "declined":
+                    dim(f"declined: {cmd_text}")
+                    continue
+                if status != "ok":
+                    emsg(feed)
+                    continue
+                user = (f"I ran the command: {cmd_text}\n"
+                        f"(network: {'on' if network else 'off'})\n\n"
+                        f"Sandboxed output:\n\n{feed}")
+                cprint("[magenta]DeepSeek:[/magenta]")
+                try:
+                    if args.no_stream:
+                        ftx, cid, usage = c.chat_once(
+                            user, thinking=args.thinking, search=args.search)
+                    else:
+                        ftx, cid, usage = c.stream_chat(
+                            user, thinking=args.thinking, search=args.search,
+                            on_delta=_stream_write)
+                        print()
+                except deepseek_client.DeepSeekError as e:
+                    emsg(str(e))
+                    continue
+                _show_links(ftx)
+                _usage_line(usage, cid)
             else:
                 warn(f"Unknown command /{cmd}. Try /help.")
             continue
@@ -1857,7 +2100,7 @@ def ds_repl(c, args, init_title=""):
         try:
             if args.no_stream:
                 ftx, cid, usage = c.chat_once(user, thinking=args.thinking, search=args.search)
-                cprint(ftx)
+                markdown(ftx)
             else:
                 ftx, cid, usage = c.stream_chat(
                     user, thinking=args.thinking, search=args.search,
@@ -1867,7 +2110,12 @@ def ds_repl(c, args, init_title=""):
             emsg(str(e))
             continue
         _show_links(ftx)
-        _offer_code_saves(user, ftx)
+        last_reply = ftx
+        _dl_hint(ftx)
+        if c.forked:
+            dim("Started a new forked thread (file attached to a running "
+                "conversation). The old thread is preserved in /history.")
+            c.forked = False
         if cid:
             dim(f"(conversation {_cid_key(c)})")
         if not conv_title:
@@ -1911,21 +2159,49 @@ Commands:
   /history         list saved conversations
   /use <id>        resume a saved conversation
   /view <id>       print a conversation + offer to save code blocks
-  /print [full]    print current or given conversation (truncated unless 'full')
+  /download        save the code blocks from the last reply (or /download <id>)
+  /print [full]    print current or given conversation (short unless 'full')
   /rename <title>  rename current conversation
   /del <id>        delete a conversation
   /save <path>     export conversation to .md — /save <id> [path] exports a stored chat
   /token           show stored token (masked)
   /exit, /quit     leave
- !<cmd>            run a shell command
-Anything else is sent to Qwen. Enter a blank line to start over.
+  /run <cmd> [--net] [--timeout N]   run sandboxed and feed the result to Qwen
+  /agent <task>   start the autonomous sandboxed agent loop (oracle tier)
+  !<cmd>          run locally in your shell (no sandbox, no policy)
+    Anything else is sent to Qwen. Enter a blank line to start over.
 """)
 
 
+_remembered_shell: set[str] = set()
+
+
+def _run_cmd_approve(verdict, argv):
+    """Approval callback for sandbox.run(): interpreters always prompt,
+    mutators prompt once per session (remembered), oracle auto-runs."""
+    line = sandbox.cmdline(argv)
+    if verdict.klass == sandbox.INTERPRETER:
+        warn(f"[interpreter] {line}")
+        dim(f"  ({verdict.reason}) — code execution")
+        return ask_yes_no("Allow", False)
+    if verdict.klass == sandbox.MUTATOR:
+        if line in _remembered_shell:
+            return True
+        warn(f"[mutator] {line}")
+        dim(f"  ({verdict.reason})")
+        ok = ask_yes_no("Allow (remembered for this session)", True)
+        if ok:
+            _remembered_shell.add(line)
+        return ok
+    return True
+
+
 def _run_shell(cmd):
-    """Run a shell command from a REPL line prefixed with '!'. Streams
-    stdout/stderr live and shows the exit status when non-zero."""
-    import subprocess
+    """Run a command from a REPL line prefixed with '!'. Only the local user
+    can type it, so it runs unsandboxed in the real shell — no sandbox, no
+    policy. `raw ` prefix kept for backwards compatibility (no-op)."""
+    if cmd.startswith("raw "):
+        cmd = cmd[4:].strip()
     try:
         proc = subprocess.Popen(cmd, shell=True,
                                 stdout=subprocess.PIPE,
@@ -1949,6 +2225,46 @@ def _run_shell(cmd):
         dim(f"exit code: {proc.returncode}")
 
 
+def _show_result(res):
+    """Print a sandbox result dict."""
+    if res["stdout"]:
+        print(res["stdout"], end="")
+    if res["stderr"]:
+        sys.stdout.write(res["stderr"])
+        sys.stdout.flush()
+    note = f"[{res['backend']}] exit {res['exit_code']} in {res['duration']}s"
+    if res["truncated"]:
+        note += " | output truncated"
+    if res["exit_code"]:
+        dim(note)
+    else:
+        okmsg(note)
+
+
+def _run_cmd_feed(cmd, workspace=None, network=False,
+                  timeout_s=sandbox.DEFAULT_TIMEOUT if sandbox else 30,
+                  max_out=sandbox.DEFAULT_MAX_OUT if sandbox else 262144):
+    """Execute a command for /run, returning (status, text) where text is the
+    combined output. status is 'ok' | 'declined' | 'denied' | 'error'."""
+    try:
+        argv = sandbox.parse(cmd)
+    except ValueError as e:
+        return "error", f"parse error: {e}"
+    try:
+        res = sandbox.run(argv=argv, workspace=workspace, network=network,
+                          timeout_s=timeout_s, max_out=max_out,
+                          approve=_run_cmd_approve)
+    except PermissionError as e:
+        return "declined", str(e)
+    except sandbox.SandboxError as e:
+        return "denied", str(e)
+    out = (res.get("stdout") or "") + (res.get("stderr") or "")
+    tag = f"### exit {res['exit_code']} [backend {res['backend']}]"
+    if res.get("truncated"):
+        tag += " (truncated)"
+    return "ok", (tag + "\n" + out).rstrip()
+
+
 def repl(client, init_title=""):
     init_readline()
     title = f"Qwen Chat — {client.model}"
@@ -1957,6 +2273,7 @@ def repl(client, init_title=""):
     transcript: list[tuple[str, str]] = []
     conv_title = init_title
     multiline = False
+    last_reply = ""
 
     while True:
         if conv_title:
@@ -2040,6 +2357,27 @@ def repl(client, init_title=""):
                     emsg("usage: /view <chat_id>")
                     continue
                 cmd_view(argparse.Namespace(chat_id=arg))
+            elif cmd == "download":
+                # /download          -> save code blocks from the last reply
+                # /download <id>     -> save every code block in a chat
+                if arg:
+                    try:
+                        data = client.get_chat(arg)
+                    except QwenError as e:
+                        emsg(str(e))
+                        continue
+                    if not data or not data.get("id"):
+                        emsg(f"Conversation {arg} not found.")
+                        continue
+                    label = f"qwen-{arg}"
+                    msgs = data.get("chat", {}).get("messages", [])
+                    blocks = _dl_chat_blocks({"messages": msgs}, _msg_answer)
+                    _offer_download_blocks(label, blocks)
+                elif last_reply:
+                    label = f"qwen-{client._chat_id}" if client._chat_id else "qwen-live"
+                    _offer_download_blocks(label, _dl_blocks_text(last_reply))
+                else:
+                    emsg("No reply yet. Send a message or use /download <chat_id>.")
             elif cmd == "print":
                 parts = arg.split()
                 if parts and parts[0].lower() in ("full", "true", "1", "y"):
@@ -2124,6 +2462,90 @@ def repl(client, init_title=""):
                         okmsg(f"Saved to {path}")
             elif cmd == "token":
                 cmd_token(argparse.Namespace())
+            elif cmd == "agent":
+                if not arg:
+                    emsg("usage: /agent <task...>")
+                    continue
+                if agent_mod is None:
+                    emsg("agent.py not found next to qwen.py.")
+                    continue
+                task = arg
+                okmsg(f"starting agent loop (tier=oracle) — chat {client._chat_id}")
+                try:
+                    res = agent_mod.agent_loop(
+                        client, task,
+                        tier="oracle", workspace=os.getcwd(),
+                        workspace_ro=False, max_steps=12, timeout_s=30,
+                        interactive=True, on_result=_agent_progress,
+                        log_path=None)
+                except agent_mod.AgentError as e:
+                    emsg(str(e))
+                    continue
+                print()
+                if res["status"] == "done":
+                    okmsg(f"Done in {res['steps']} steps ({res['duration']}s)")
+                    if res["summary"]:
+                        dim(f"summary: {res['summary']}")
+                else:
+                    warn(f"Reached the step cap without ```done```.")
+            elif cmd == "run":
+                if not arg:
+                    emsg("usage: /run <cmd> [--net] [--timeout N]")
+                    continue
+                if sandbox is None:
+                    emsg("sandbox.py not available — cannot /run")
+                    continue
+                network = False
+                timeout_s = sandbox.DEFAULT_TIMEOUT
+                tokens = arg.split()
+                kept = []
+                i = 0
+                while i < len(tokens):
+                    t = tokens[i]
+                    if t == "--net":
+                        network = True
+                    elif t == "--timeout":
+                        try:
+                            timeout_s = int(tokens[i + 1])
+                            i += 1
+                        except (IndexError, ValueError):
+                            emsg("--timeout needs a number")
+                            timeout_s = sandbox.DEFAULT_TIMEOUT
+                    else:
+                        kept.append(t)
+                    i += 1
+                cmd_text = " ".join(kept).strip()
+                if not cmd_text:
+                    emsg("usage: /run <cmd> [--net] [--timeout N]")
+                    continue
+                status, feed = _run_cmd_feed(
+                    cmd_text, workspace=os.getcwd(), network=network,
+                    timeout_s=timeout_s)
+                if status == "declined":
+                    dim(f"declined: {cmd_text}")
+                    continue
+                if status != "ok":
+                    emsg(feed)
+                    continue
+                user = (f"I ran the command: {cmd_text}\n"
+                        f"(network: {'on' if network else 'off'})\n\n"
+                        f"Sandboxed output:\n\n{feed}")
+                transcript.append(("user", user))
+                cprint("[cyan]Qwen:[/cyan]")
+                try:
+                    full, usage, chat_id = client.stream_chat(
+                        user, on_delta=_stream_write)
+                    print()
+                except QwenError as e:
+                    emsg(str(e))
+                    transcript.pop()
+                    continue
+                transcript.append(("assistant", full))
+                last_reply = full
+                _dl_hint(full)
+                if usage:
+                    dim(f"({usage.get('total_tokens', '?')} tokens | "
+                        f"chat {chat_id or 'new'})")
             else:
                 warn(f"Unknown command /{cmd}. Try /help.")
             continue
@@ -2138,6 +2560,8 @@ def repl(client, init_title=""):
             transcript.pop()
             continue
         transcript.append(("assistant", full))
+        last_reply = full
+        _dl_hint(full)
         if usage:
             dim(f"({usage.get('total_tokens', '?')} tokens | chat {chat_id or 'new'})")
         if not conv_title and client._chat_id:
@@ -2146,38 +2570,6 @@ def repl(client, init_title=""):
                 conv_title = (cur or {}).get("title") or ""
             except QwenError:
                 conv_title = ""
-        _offer_code_saves(user, full)
-
-
-def _offer_code_saves(user, full):
-    blocks = _extract_code_blocks(full)
-    if not blocks:
-        return
-    cprint(f"[bold green]>>> {len(blocks)} code block(s) — save as files?[/bold green]")
-    for i, b in enumerate(blocks, 1):
-        lang = b["lang"]
-        code = b["content"]
-        fname = b["filename"] or f"block{i}.{_lang_ext(lang)}"
-        _preview_block(i, b, fname)
-        try:
-            inp = input(f"  save block {i} as [{fname}]? (enter=save, 'n'=skip): ")
-        except EOFError:
-            return
-        except KeyboardInterrupt:
-            print()
-            dim("skipped the rest")
-            return
-        s = inp.strip()
-        if s.lower() in ("n", "no", "q"):
-            dim(f"      skipped block {i}")
-            continue
-        path = s if s else fname
-        try:
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(code)
-            okmsg(f"      saved -> {os.path.abspath(path)}")
-        except OSError as ex:
-            emsg(f"      could not write {path}: {ex}")
 
 
 def _offer_ds_code_saves(c, chat_id):
@@ -2224,8 +2616,8 @@ def _offer_ds_code_saves(c, chat_id):
             emsg(f"  could not write {path}: {ex}")
 
 
-def _preview_block(i, b, default):
-    lines = b["content"].splitlines()
+def _preview_block(i, block, default):
+    lines = block["content"].splitlines()
     total = len(lines)
     shown = lines[:8]
     dim(f"  --- preview of block {i} ({default}, {total} lines) ---")
@@ -2233,6 +2625,114 @@ def _preview_block(i, b, default):
         _console.print(f"      {ln}", highlight=False) if _RICH else print(f"      {ln}")
     if total > 8:
         dim(f"      ... {total - 8} more line(s)")
+
+
+def _dl_base():
+    """Base directory for /download — QWEN_DL_DIR env, else ./downloads."""
+    return os.environ.get("QWEN_DL_DIR", os.path.join(os.getcwd(), "downloads"))
+
+
+def _dl_safe_name(name):
+    """Turn an arbitrary chat id / label into a clean directory name."""
+    clean = re.sub(r"[^\w.-]+", "_", name).strip("._") or "chat"
+    return clean
+
+
+def _dl_unique_path(dest_dir, name):
+    """Return a path under dest_dir for `name`, adding _1, _2 ... on clashes."""
+    base, ext = os.path.splitext(name)
+    cand = os.path.join(dest_dir, name)
+    i = 1
+    while os.path.exists(cand):
+        cand = os.path.join(dest_dir, f"{base}_{i}{ext}")
+        i += 1
+    return cand
+
+
+def _dl_blocks_text(text):
+    """Shortcut: count / extract code blocks from a raw reply."""
+    return _extract_code_blocks(text)
+
+
+def _dl_chat_blocks(chat, render):
+    """Collect every code block across an assistant's messages in a chat."""
+    blocks = []
+    for m in chat.get("messages") or []:
+        if m.get("role") == "assistant":
+            blocks.extend(_extract_code_blocks(render(m)))
+    return blocks
+
+
+def _offer_download_blocks(label, blocks, dest_dir=None):
+    """Batch-save code blocks with a single prompt. Returns how many saved.
+
+    Accepts at the prompt: Enter/yes/all, a comma list like 1,3,6, or no/0 to
+    skip. Files go to dest_dir (default ./downloads/<label>/), each written
+    only if its name doesn't collide (a _n suffix is added otherwise)."""
+    if not blocks:
+        dim("No code blocks to download.")
+        return 0
+    if dest_dir is None:
+        dest_dir = os.path.join(_dl_base(), _dl_safe_name(label))
+    os.makedirs(dest_dir, exist_ok=True)
+    cprint(f"\n[bold cyan]>>> {len(blocks)} code block(s) from {label!r}[/bold cyan]")
+    for i, b in enumerate(blocks, 1):
+        n = b["content"].count("\n") + 1
+        name = (b.get("filename") or "").replace(" ", "_") or f"block_{i}.{_lang_ext(b['lang'])}"
+        cprint(f"  {i:2d}. {name:<28} ({n} line(s))", highlight=False)
+    try:
+        sel = input(f"  save to {dest_dir}?  [Enter=all | 1,3,6 | no] ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    s = sel.strip().lower()
+    if s in ("", "y", "yes", "all", "*"):
+        want = list(range(1, len(blocks) + 1))
+    elif s in ("n", "no", "0", "q", "quit", "skip"):
+        dim(f"  skipped ({label})")
+        return 0
+    else:
+        want = []
+        for part in s.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                try:
+                    a, b = part.split("-")
+                    want.extend(range(int(a), int(b) + 1))
+                    continue
+                except ValueError:
+                    pass
+            try:
+                want.append(int(part))
+            except ValueError:
+                pass
+        want = sorted({i for i in want if 1 <= i <= len(blocks)})
+        if not want:
+            dim("  nothing matched — skipped.")
+            return 0
+    saved = 0
+    for i in want:
+        b = blocks[i - 1]
+        name = (b.get("filename") or "").replace(" ", "_") or f"block_{i}.{_lang_ext(b['lang'])}"
+        path = _dl_unique_path(dest_dir, name)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(b["content"])
+        except OSError as ex:
+            emsg(f"  could not write {path}: {ex}")
+            continue
+        okmsg(f"  saved -> {os.path.abspath(path)}")
+        saved += 1
+    return saved
+
+
+def _dl_hint(full):
+    """Print a quiet hint when a reply contains saveable code blocks."""
+    n = len(_extract_code_blocks(full))
+    if n:
+        dim(f"({n} code block(s) — type /download to save)")
 
 # Language name → file extension, and the set of file extensions we treat as
 # code for caption/filename detection. Kept broad so any common language a
@@ -2427,6 +2927,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--dl-dir", default=None,
+                        help="base directory for /download (default: ./downloads)")
     sub = parser.add_subparsers(dest="command")
 
     p_login = sub.add_parser("login", help="login / capture a session")
@@ -2468,7 +2970,9 @@ def main():
     p_ds.add_argument("--thinking", action="store_true", help="enable DeepThink reasoning")
     p_ds.add_argument("--search", action="store_true", help="enable web search")
     p_ds.add_argument("--no-stream", action="store_true", help="disable streaming output")
-    p_ds.add_argument("-u", "--base-url", default=None,
+    p_ds.add_argument("-u", "--upload", action="append", metavar="PATH",
+                      help="attach a file before asking (repeatable)")
+    p_ds.add_argument("-b", "--base-url", default=None,
                       help="proxy base URL (default: $DEEPSEEK_BASE_URL or http://localhost:8000)")
 
     sub.add_parser("chat", help="interactive REPL (default)")
@@ -2481,7 +2985,54 @@ def main():
     p_print.add_argument("--full", action="store_true",
                         help="print every message in full (default: first lines only)")
 
+    p_sb = sub.add_parser("sandbox", help="sandbox backend diagnostics")
+    p_sb.add_argument("--check", action="store_true",
+                      help="verify policy + backend and print the active mode")
+    p_sb.add_argument("--list", action="store_true",
+                      help="print the loaded policy tables")
+
+    p_run = sub.add_parser("run", help="run a command in the sandbox (headless)")
+    p_run.add_argument("run_args", nargs=argparse.REMAINDER,
+                       help="command line to run (argv, no shell)")
+    p_run.add_argument("--net", action="store_true",
+                       help="allow network access in the sandbox")
+    p_run.add_argument("--timeout", type=int,
+                       default=(sandbox.DEFAULT_TIMEOUT if sandbox else 30))
+    p_run.add_argument("--workspace", default=os.getcwd(),
+                       help="directory to bind read-write (default: cwd)")
+    p_run.add_argument("--max-out", type=int,
+                       default=(sandbox.DEFAULT_MAX_OUT if sandbox else 262144))
+    p_run.add_argument("--sandbox", choices=["bwrap", "docker", "restricted"],
+                       help="force a backend (restricted = weak, argv-only)")
+
+    p_agent = sub.add_parser("agent", help="autonomous sandboxed agent loop")
+    p_agent.add_argument("task", nargs=argparse.REMAINDER, metavar="TASK...",
+                         help="task for the agent to complete")
+    p_agent.add_argument("-t", "--tier", choices=["oracle", "mutator", "interpreter"],
+                         default="oracle",
+                         help="approval tier (default: oracle = read-only auto)")
+    p_agent.add_argument("--workspace", default=os.getcwd(),
+                         help="directory to work on (default: cwd)")
+    p_agent.add_argument("--workspace-ro", action="store_true",
+                         help="mount workspace read-only (writes fail)")
+    p_agent.add_argument("--steps", type=int, default=agent_mod.DEFAULT_STEPS if agent_mod else 12,
+                         help="max command steps before giving up")
+    p_agent.add_argument("--timeout", type=int, default=30,
+                         help="per-command timeout in seconds")
+    p_agent.add_argument("--max-out", type=int,
+                         default=(sandbox.DEFAULT_MAX_OUT if sandbox else 262144),
+                         help="max captured output bytes per command")
+    p_agent.add_argument("--sandbox", choices=["bwrap", "docker", "restricted"],
+                         help="force a backend (restricted = weak, argv-only)")
+    p_agent.add_argument("--allow-interpreters", action="store_true",
+                         help="allow the interpreter tier (arbitrary code exec) "
+                              "— dangerous, requires explicit opt-in")
+    p_agent.add_argument("-l", "--log", default=None,
+                         help="write a redacted transcript to this file")
+
     args = parser.parse_args()
+    if getattr(args, "dl_dir", None):
+        os.environ["QWEN_DL_DIR"] = args.dl_dir
     cmd = args.command or "chat"
 
     if cmd == "login":
@@ -2509,6 +3060,12 @@ def main():
         cmd_ask(args)
     elif cmd == "print":
         cmd_print(args)
+    elif cmd == "sandbox":
+        cmd_sandbox(args)
+    elif cmd == "run":
+        cmd_run(args)
+    elif cmd == "agent":
+        cmd_agent(args)
     elif cmd == "ds":
         cmd_ds(args)
     else:
