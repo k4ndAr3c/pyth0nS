@@ -2260,6 +2260,13 @@ def _prompt_input(prompt):
     return input(prompt)
 
 
+def _esc(txt):
+    """Escape rich markup so literal [brackets] aren't consumed as style tags."""
+    if not _RICH:
+        return txt
+    return txt.replace("[", "\\[")
+
+
 def _repl_prompt(model, conv_title="", thinking=None, search=None,
                  reasoning=None):
     """Colored REPL prompt. Model in bold cyan, conversation title in dim
@@ -2270,28 +2277,29 @@ def _repl_prompt(model, conv_title="", thinking=None, search=None,
     flags = ""
     if thinking is not None:
         if thinking:
-            flags += "[magenta][think:on][/magenta]"
+            flags += "[magenta]{}[/magenta]".format(_esc("[think:on]"))
         else:
-            flags += "[dim][think:off][/dim]"
+            flags += "[dim]{}[/dim]".format(_esc("[think:off]"))
     if search is not None:
         if search:
-            flags += "[cyan][search:on][/cyan]"
+            flags += "[cyan]{}[/cyan]".format(_esc("[search:on]"))
         else:
-            flags += "[dim][search:off][/dim]"
+            flags += "[dim]{}[/dim]".format(_esc("[search:off]"))
     if reasoning is not None:
-        flags += "[green][reason:{}][/green]".format(reasoning or "auto")
+        flags += "[green]{}[/green]".format(
+            _esc("[reason:{}]".format(reasoning or "auto")))
     if _RICH:
-        title = f"[yellow]{conv_title}[/yellow]" if conv_title else ""
+        title = "[yellow]{}[/yellow]".format(_esc(conv_title)) if conv_title else ""
         sep = "[dim]|[/dim]" if title else ""
-        return f"\n[bold cyan]{model}[/bold cyan]{sep}{title}{flags} [bold]>[/bold] "
+        return f"\n[bold cyan]{_esc(model)}[/bold cyan]{sep}{title}{flags} [bold]>[/bold] "
     title = f"| {conv_title}" if conv_title else ""
     plain = f"{model}{title}"
     if thinking is not None:
-        plain += f"(think:{'on' if thinking else 'off'})"
+        plain += "[think:on]" if thinking else "[think:off]"
     if search is not None:
-        plain += f"(search:{'on' if search else 'off'})"
+        plain += "[search:on]" if search else "[search:off]"
     if reasoning is not None:
-        plain += f"(reason:{reasoning or 'auto'})"
+        plain += "[reason:{}]".format(reasoning or "auto")
     return f"\n{plain}> "
 
 
