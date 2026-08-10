@@ -1,0 +1,86 @@
+# Policy for sandboxed command execution (``qwen.py !cmd``, ``/run``).
+#
+# Every command is classified into one of four classes:
+#   oracle      -- safe read-only tools, auto-run (output returned)
+#   interpreter -- arbitrary code executors (python3 -c, node -e, sh -c, ...).
+#                  ALWAYS require approval; combined with --net they are denied
+#                  outright (exfiltration channel). `-c` source is never
+#                  sniffed — it is obfuscatable, so the class is all-or-nothing.
+#   mutator     -- changes state (git add/commit/push, pip, make, npm, rm, ...),
+#                  requires approval; remembered for the rest of the session.
+#   deny        -- never allowed, ever.
+#
+# Matching is a strict prefix on argv tokens ("git status" only matches
+# commands whose first two args are exactly `git status`). Longest pattern
+# wins, so "python3 -c" beats the catch-all "python3".
+
+[oracle]
+commands = [
+  # read-only file inspection
+  "ls", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "find",
+  "diff", "sha256sum", "md5sum", "stat", "du", "df", "which",
+  "basename", "dirname", "realpath", "file", "wc",
+  # harmless reporting
+  "env", "echo", "printf", "date", "uptime", "uname",
+  # git, read-only surface only (hooks neutralised in the sandbox)
+  "git status", "git diff", "git log", "git show",
+  "git branch", "git rev-parse", "git ls-files",
+  # pinned script execution (sub/run.py) requires a sha256 pin in
+  # [approved_scripts] below — otherwise it is treated as an interpreter
+]
+
+[interpreter]
+# mv, rm, cp are mutators. Interpreter entries take precedence: anything
+# matching here can run arbitrary code and is therefore ALWAYS prompted.
+# "sh"/"bash"/"zsh" with no flag still run a script/stdin, so keep the plain
+# name here too.
+commands = [
+  "python3", "python", "python3 -c", "python3 -m", "python3 -",
+  "python -c", "python -m",
+  "node", "node -e",
+  "bash", "bash -c", "sh", "sh -c", "zsh", "zsh -c",
+  "perl", "perl -e", "ruby", "ruby -e",
+  "php -r", "php -f",
+  "pwsh", "powershell",
+  "deno", "deno eval", "bun -e",
+  "awk",
+  "sed -e", "sed -i",
+]
+
+[mutator]
+# anything not matched above gets a prompt too, but these are the ones we
+# explicitly list as state-changing.
+commands = [
+  # shell pipelines/redirections arrive here as plain args, never executed.
+  "git",                  # catch-all leaves git add/push/etc. as mutators
+  "git add", "git commit", "git push", "git pull", "git merge", "git clean",
+  "git reset", "git checkout", "git switch", "git stash",
+  "git remote", "git fetch",
+  "cp", "mv", "rm", "mkdir", "rmdir", "touch", "ln",
+  "install", "truncate", "dd",
+  "make", "cmake", "ninja", "meson", "cargo", "go", "node-gyp",
+  "pip", "pip3", "npm", "yarn", "pnpm", "npx", "uv",
+  "docker", "podman", "compose",
+  "curl", "wget", "git clone",
+  "mysqldump", "psql", "sqlite3",
+  "crontab", "systemctl",
+  "tar", "gzip", "bzip2", "xz", "zip", "unzip", "7z",
+  "git rev-list",
+]
+
+[deny]
+commands = [
+  "sudo", "su",
+  "chmod", "chown", "chgrp",
+  "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkswap",
+  "dd", "fdisk", "parted", "cryptsetup", "losetup",
+  "halt", "poweroff", "reboot", "shutdown", "init",
+  "dmesg",
+  "insmod", "rmmod", "modprobe",
+  # these would defeat the sandbox's isolation
+  "unshare", "nsenter", "setuid", "setpriv",
+]
+
+[approved_scripts]
+# Automatically run ``python3 <script>`` ONLY when the file's sha256 matches.
+# "sub/run.py" = "sha256:0000..."   <-- example; remove the comment before use.

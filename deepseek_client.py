@@ -117,7 +117,19 @@ class DeepSeekSession:
                  store_path: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.conversation_id: str | None = None
+        self._conversation_id: str | None = None
+        # Session-level DeepThink / web-search state. `stream_chat`/`chat_once`
+        # default to these when the flag isn't passed explicitly, and per-chat
+        # values are persisted/restored so a resumed conversation keeps its
+        # toggles (mirroring the web UI's per-conversation buttons).
+        self.thinking: bool = False
+        self.search: bool = False
+        # Last-known toggle state of the live thread (None until the thread has
+        # a stored/received state). DeepSeek binds `thinking` to the thread at
+        # creation, so sending a message whose toggles differ from this forks
+        # the conversation instead of replying on the mismatched thread.
+        self._thread_thinking: bool | None = None
+        self._thread_search: bool | None = None
         self._session = requests.Session()
         # No global Content-Type: requests sets application/json for `json=`
         # bodies and the correct multipart boundary for `files=` uploads.
@@ -144,6 +156,9 @@ class DeepSeekSession:
         # True once a message deliberately started a fresh branch (new file
         # added to an already-started conversation); the REPL surfaces it.
         self.forked: bool = False
+        # The thread id that a fork left behind, so the REPL can point the user
+        # back to it (`/use <id>`). Reset when the notice is shown.
+        self._forked_from: str | None = None
 
     # -- low level -------------------------------------------------------- #
     def _url(self, path: str) -> str:
@@ -270,45 +285,101 @@ class DeepSeekSession:
         lines.append("Assistant:")
         return "\n\n".join(lines)
 
-    def _body(self, prompt: str, *, thinking: bool, search: bool, stream: bool) -> dict:
+    def _body(self, prompt: str, *, thinking: bool | None = None,
+              search: bool | None = None, stream: bool) -> dict:
+        # Resolve: an explicit caller flag wins, else the session-level toggle.
+        think = self.thinking if thinking is None else bool(thinking)
+        srch = self.search if search is None else bool(search)
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": stream,
-            "thinking": thinking,
-            "search": search,
+            "thinking": think,
+            "search": srch,
         }
         refs = self._forking_refs()
         if refs:
             body["ref_file_ids"] = refs
-        if self.conversation_id:
-            # A file attached to an ALREADY-STARTED thread makes chat.deepseek.com
-            # fork the conversation and reply on a different branch (our stream
-            # comes back empty). Attach it to a fresh thread instead, seeding the
-            # new branch with the prior transcript so nothing is lost.
-            if refs:
-                self.forked = True
-                body["messages"][0]["content"] = self._fork_prompt(prompt)
-                body.pop("conversation_id", None)
-            else:
-                body["conversation_id"] = self.conversation_id
+
+        # DeepSeek binds `thinking` to the thread at its creation, so flipping
+        # the toggle on an already-started thread is ignored by the server (the
+        # reply comes back empty). When the requested toggle set differs from the
+        # thread's known state, fork exactly like a new file: start a fresh
+        # thread seeded with the prior transcript so the toggle applies from
+        # creation. State is only compared when known (None = unknown/online-only).
+        state_changed = False
+        if self._thread_thinking is not None:
+            state_changed = state_changed or think != self._thread_thinking
+        if self._thread_search is not None:
+            state_changed = state_changed or srch != self._thread_search
+
+        force_fork = bool(refs) or state_changed
+        if self.conversation_id and force_fork:
+            # File/state fork: fresh branch, seeded with the transcript.
+            self.forked = True
+            self._forked_from = self.conversation_id
+            body["messages"][0]["content"] = self._fork_prompt(prompt)
+            body.pop("conversation_id", None)
+        elif self.conversation_id:
+            body["conversation_id"] = self.conversation_id
+
         self._pending_refs = list(refs)
+        # Commit the requested toggle set as thread state only once the message
+        # is accepted (`_mark_sent`), so a failed request doesn't mislabel the
+        # thread.
+        self._pending_thread_state = (think, srch)
         return body
 
     def _mark_sent(self) -> None:
         """Call after a message is successfully accepted so its file ids are
-        never re-attached to an existing node (which forks + replies empty)."""
+        never re-attached to an existing node (which forks + replies empty),
+        and the message's toggle set becomes the thread's known state. The
+        session toggles adopt that state too, so the next message resolves to
+        the same flags and doesn't fork the fresh thread again."""
         if self._pending_refs:
             self._sent_file_ids.update(self._pending_refs)
             self._pending_refs = []
+        if getattr(self, "_pending_thread_state", None) is not None:
+            self._thread_thinking, self._thread_search = self._pending_thread_state
+            self.thinking, self.search = self._pending_thread_state
+            self._pending_thread_state = None
 
     # -- conversation persistence ------------------------------------------ #
-    def _record(self, prompt: str, reply: str) -> None:
+    @property
+    def conversation_id(self) -> str | None:
+        return self._conversation_id
+
+    @conversation_id.setter
+    def conversation_id(self, value: str | None) -> None:
+        self._conversation_id = value
+        # A resume-by-token (session set directly, e.g. `-c`/`--cid`) skips
+        # use_chat(), leaving `log` empty — and an empty log would clobber the
+        # stored transcript on the next persist. Hydrate history from the store
+        # so a continued thread keeps all its prior turns (and its toggles).
+        if value and not self.log:
+            rec = self.store.get(_cid_key(value))
+            if rec:
+                self.log = list(rec.get("messages") or [])
+                self._restore_thread_state(rec)
+
+    def _restore_thread_state(self, rec: dict) -> None:
+        """Adopt a stored chat's toggle state into the session, so resuming a
+        DeepThink/web-search conversation keeps its buttons as the web UI does.
+        Unknown fields leave the session state (and thus _thread_*) untouched."""
+        if not rec:
+            return
+        for flag in ("thinking", "search"):
+            if flag in rec and rec[flag] is not None:
+                setattr(self, flag, bool(rec[flag]))
+                setattr(self, f"_thread_{flag}", bool(rec[flag]))
+
+    def _record(self, prompt: str, reply: str,
+                reply_pending: bool = False) -> None:
         self.log.append({"role": "user", "content": prompt})
         self.log.append({"role": "assistant", "content": reply})
-        self._persist()
+        self._persist(reply_pending=reply_pending)
 
-    def _persist(self) -> None:
+    def _persist(self, reply_pending: bool = False) -> None:
         cid = self.conversation_id or ""
         key = _cid_key(cid)
         if not key or not self.log:
@@ -322,6 +393,14 @@ class DeepSeekSession:
         chat["conversation_id"] = cid
         chat["messages"] = self.log
         chat["model"] = self.model
+        chat["thinking"] = self._thread_thinking if self._thread_thinking is not None \
+            else self.thinking
+        chat["search"] = self._thread_search if self._thread_search is not None \
+            else self.search
+        if reply_pending:
+            chat["reply_pending"] = True
+        else:
+            chat.pop("reply_pending", None)
         self.store.save(chat)
 
     def new_conversation(self) -> None:
@@ -330,6 +409,13 @@ class DeepSeekSession:
         self.attachments = []
         self._sent_file_ids = set()
         self.forked = False
+        self._forked_from = None
+        # Session toggles survive a /new (matching the web UI's persisted
+        # buttons), but the fresh thread has no known state until a message is
+        # actually accepted on it.
+        self._thread_thinking = None
+        self._thread_search = None
+        self._pending_thread_state = None
 
     def save_chat(self, title: str | None = None) -> str:
         """Persist the current thread under a title, returning its chat id."""
@@ -343,6 +429,10 @@ class DeepSeekSession:
             "conversation_id": self.conversation_id or key,
             "messages": self.log,
             "model": self.model,
+            "thinking": self._thread_thinking if self._thread_thinking is not None
+            else self.thinking,
+            "search": self._thread_search if self._thread_search is not None
+            else self.search,
         })
         self.store.save(chat)
         return key
@@ -471,12 +561,17 @@ class DeepSeekSession:
         chat = self.store.get(chat_id)
         if not chat:
             raise DeepSeekError(f"Conversation {chat_id} not found.")
-        self.conversation_id = chat.get("conversation_id") or chat_id
+        # Load transcript before setting conversation_id so the setter doesn't
+        # redundantly re-hydrate it from the store.
         self.log = list(chat.get("messages") or [])
+        self.conversation_id = chat.get("conversation_id") or chat_id
         self.model = chat.get("model") or self.model
+        self._restore_thread_state(chat)
+        self._pending_thread_state = None
         self.attachments = []
         self._sent_file_ids = set()
         self.forked = False
+        self._forked_from = None
         return chat
 
     def get_chat(self, chat_id: str) -> dict | None:
@@ -513,8 +608,10 @@ class DeepSeekSession:
         return self.store.delete(chat_id)
 
     # -- public ------------------------------------------------------------ #
-    def chat_once(self, prompt: str, *, thinking: bool = False, search: bool = False):
-        """Non-streaming: return (full_text, conversation_id, usage)."""
+    def chat_once(self, prompt: str, *, thinking: bool | None = None,
+                  search: bool | None = None):
+        """Non-streaming: return (full_text, conversation_id, usage). `thinking`
+        and `search` default to the session's stored toggle state."""
         self._check_base()
         body = self._body(prompt, thinking=thinking, search=search, stream=False)
         try:
@@ -526,6 +623,13 @@ class DeepSeekSession:
         except ValueError:
             raise DeepSeekError(f"Proxy returned non-JSON ({r.status_code}).")
         if "error" in data:
+            cid = data.get("conversation_id")
+            if cid:
+                # The thread/turn was created server-side despite the error, so
+                # mark it pending to keep the store in sync with the live thread.
+                self.conversation_id = cid
+                self._mark_sent()
+                self._record(prompt, "", reply_pending=True)
             raise DeepSeekError(data["error"].get("message", "Unknown proxy error"))
         text = "".join(
             (c.get("message") or {}).get("content") or ""
@@ -535,12 +639,13 @@ class DeepSeekSession:
         if cid:
             self.conversation_id = cid
         self._mark_sent()
-        self._record(prompt, text)
+        self._record(prompt, text, reply_pending=bool(data.get("reply_pending")))
         return text, cid, data.get("usage") or {}
 
-    def stream_chat(self, prompt: str, *, thinking: bool = False, search: bool = False,
-                    on_delta=None):
-        """Stream a reply. Yields text deltas; returns (full, cid, usage)."""
+    def stream_chat(self, prompt: str, *, thinking: bool | None = None,
+                    search: bool | None = None, on_delta=None):
+        """Stream a reply. Yields text deltas; returns (full, cid, usage).
+        `thinking` and `search` default to the session's stored toggle state."""
         self._check_base()
         body = self._body(prompt, thinking=thinking, search=search, stream=True)
         try:
@@ -560,6 +665,8 @@ class DeepSeekSession:
 
         full: list[str] = []
         usage: dict = {}
+        reply_pending = False
+        exc: BaseException | None = None
         try:
             for raw in r.iter_lines(decode_unicode=True):
                 if not raw:
@@ -587,11 +694,21 @@ class DeepSeekSession:
                     self.conversation_id = evt["conversation_id"]
                 if evt.get("usage"):
                     usage = evt["usage"]
+                if evt.get("reply_pending"):
+                    reply_pending = True
+        except BaseException as e:  # noqa: BLE001 — persist partial anyway
+            exc = e
         finally:
             r.close()
+        # Persist whatever we got (possibly partial, possibly erroring) so the
+        # stored transcript and conversation_id never silently diverge from the
+        # live thread.
+        text = "".join(full)
         self._mark_sent()
-        self._record(prompt, "".join(full))
-        return "".join(full), self.conversation_id, usage
+        self._record(prompt, text, reply_pending=reply_pending)
+        if exc is not None:
+            raise exc
+        return text, self.conversation_id, usage
 
     def close(self) -> None:
         self._session.close()
@@ -610,8 +727,10 @@ def main(argv=None):
     pa = sub.add_parser("ask", help="one-shot question against the proxy")
     pa.add_argument("prompt", nargs="+", help="your question")
     pa.add_argument("-m", "--model", default=DEFAULT_MODEL)
-    pa.add_argument("--thinking", action="store_true")
-    pa.add_argument("--search", action="store_true")
+    pa.add_argument("--thinking", action="store_true", default=argparse.SUPPRESS,
+                    help="enable DeepThink (defaults to the thread's state)")
+    pa.add_argument("--search", action="store_true", default=argparse.SUPPRESS,
+                    help="enable web search (defaults to the thread's state)")
     pa.add_argument("--no-stream", action="store_true")
     pa.add_argument("-c", "--cid", default=None, help="resume a conversation_id")
 
@@ -632,16 +751,19 @@ def main(argv=None):
         prompt = " ".join(args.prompt)
         if args.cid:
             ds.conversation_id = args.cid
+        # None (flag absent) -> resolve from the session/thread state instead of
+        # forcing a fresh thread's default off.
+        thinking = getattr(args, "thinking", None)
+        search = getattr(args, "search", None)
         if args.no_stream:
-            text, cid, usage = ds.chat_once(
-                prompt, thinking=args.thinking, search=args.search)
+            text, cid, usage = ds.chat_once(prompt, thinking=thinking, search=search)
             print(text)
         else:
             def _w(p):
                 sys.stdout.write(p)
                 sys.stdout.flush()
             full, cid, usage = ds.stream_chat(
-                prompt, thinking=args.thinking, search=args.search, on_delta=_w)
+                prompt, thinking=thinking, search=search, on_delta=_w)
             print()
         if cid:
             print(f"(conversation_id: {cid})")

@@ -13,7 +13,10 @@ Uses only the `requests` and `rich` libraries (both already installed).
 Usage:
   qwen.py login [--token JWT | --email E --password P]
   qwen.py chat                 # interactive REPL (the default)
+  qwen.py chat -c              # resume the most recent conversation
+  qwen.py -c                   # same, with the default REPL
   qwen.py ask "your question"  # one-shot question
+  qwen.py ask "?" --reasoning thinking   # force deep reasoning
   qwen.py status               # account, model, quota + tokens used
   qwen.py models               # list available models
   qwen.py history              # list saved conversations
@@ -22,7 +25,7 @@ Usage:
   qwen.py del <chat_id>        # delete a saved conversation
   qwen.py token                # show the stored token (masked)
   qwen.py logout
-  qwen.py ds [ask|chat|models|history|sync|new|use|del]
+  qwen.py ds [ask|chat|models|history|sync|new|use|view|print|del]
                                # DeepSeek via local Deepseek-API proxy
                                #   (git clone Deepseek-API && python app.py)
 
@@ -34,10 +37,12 @@ Interactive REPL commands:
   /clearfiles     drop all attached files
   /new            start a new conversation
   /status         show quota + tokens used so far
+  /reason [auto|thinking|fast] reasoning mode (no arg cycles)
   /history        list saved conversations
+  /grep <pattern> [ids...] [-n N | -a] search conversations (default: all)
   /use <id>       resume a saved conversation
   /rename <title> rename the current conversation
-  /del <id>       delete a saved conversation
+  /del <id>... [-n N] [-f] delete conversations (ids or the N most recent)
   /save <path>    save transcript to a file (.md) — /save <id> [path] exports a stored chat
   /token          show stored token (masked)
   /exit           quit
@@ -102,6 +107,7 @@ try:
     from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.table import Table
+    from rich.text import Text
     from rich import box
 
     _console = Console(highlight=False)
@@ -151,6 +157,24 @@ def _stream_write(piece):
         pass
 
 
+def _make_reason_writer():
+    """Return an `on_reason` callback that prints the thinking trace dimmed,
+    with a one-time header per response (fresh state per call)."""
+    state = {"header": False}
+
+    def _w(piece):
+        try:
+            if not state["header"]:
+                state["header"] = True
+                dim("reasoning")
+            sys.stdout.write(str(piece))
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    return _w
+
+
 def init_readline():
     """Enable interactive line editing + persistent up/down history."""
     try:
@@ -177,7 +201,8 @@ def init_readline():
     _SLASH_COMMANDS = [
         "help", "model", "models", "upload", "files", "clearfiles", "new",
         "status", "history", "use", "view", "print", "download", "rename",
-        "del", "save", "token", "exit", "quit",
+        "del", "save", "token", "exit", "quit", "think", "search", "multi",
+        "show", "run", "reason", "grep",
     ]
 
     def _complete(text, state):
@@ -409,9 +434,28 @@ class QwenClient:
         self._load_cookies()
         self._chat_id: str | None = None
         self._parent_id: str | None = None
+        # Thread this session was forked from (web search / upload can make
+        # chat.qwen.ai spawn a new thread and reply there). Lets the REPL
+        # reconnect to the old thread (`/parent`), like the web UI's arrows.
+        self._parent_chat_id: str | None = None
         self.attachments: list[dict] = []          # uploaded file references
         self.tokens_used = 0                       # cumulative tokens this run
         self.model = DEFAULT_MODEL
+        # Reasoning behaviour: "auto" (server default), "thinking" (force
+        # deep reasoning), "fast" (skip reasoning). Mirrors the web UI's
+        # Auto / Thinking / Fast selector.
+        self.reasoning = os.environ.get("QWEN_REASONING", "auto").lower()
+        if self.reasoning not in ("auto", "thinking", "fast"):
+            self.reasoning = "auto"
+
+    def _thinking_flag(self):
+        """Map the reasoning mode to the API's `enable_thinking` (True/False);
+        `auto` returns None so the server/model picks the default."""
+        if self.reasoning == "thinking":
+            return True
+        if self.reasoning == "fast":
+            return False
+        return None
 
     def _load_cookies(self) -> None:
         # chat.qwen.ai gates streaming behind browser anti-bot cookies; replay
@@ -625,11 +669,35 @@ class QwenClient:
             body["stream"] = bool(stream)
             if "timestamp" in body:
                 body["timestamp"] = int(time.time())
+            enable = self._thinking_flag()
+            if enable is not None:
+                msg = body["messages"][0]
+                fc = msg.get("feature_config")
+                if not isinstance(fc, dict):
+                    fc = {}
+                    msg["feature_config"] = fc
+                fc["thinking_enabled"] = enable
+                body["enable_thinking"] = enable
             return body
+        enable = self._thinking_flag()
+        if enable is not None:
+            body["enable_thinking"] = enable
         return body
 
-    def stream_chat(self, user_text, on_delta=None):
-        """Stream a completion, returning (full_text, usage, chat_id)."""
+    def _adopt_chat_id(self, chat_id):
+        """Adopt `chat_id` as the current thread, remembering the previous one
+        when the server forked us onto a new thread (web search / upload can
+        spawn one). The remembered id lets the REPL reconnect via `/parent`."""
+        if self._chat_id and chat_id and chat_id != self._chat_id:
+            self._parent_chat_id = self._chat_id
+        self._chat_id = chat_id
+
+    def stream_chat(self, user_text, on_delta=None, on_reason=None):
+        """Stream a completion, returning (full_text, usage, chat_id).
+
+        `on_delta` receives answer content; when reasoning is enabled, the
+        model's thinking trace arrives in `phase == "think"` deltas and is
+        routed to `on_reason` instead of being mixed into the answer."""
         cap = self._chat_spec()
         body = self.chat_once(user_text, stream=True)
         if cap:
@@ -685,8 +753,14 @@ class QwenClient:
                     if evt.get("usage"):
                         usage = evt["usage"]
                     piece = None
+                    reason = False
                     for ch in evt.get("choices") or []:
                         delta = (ch.get("delta") or {})
+                        if delta.get("phase") == "think" or delta.get("reasoning_content") is not None:
+                            piece = (delta.get("content")
+                                     or delta.get("reasoning_content") or None)
+                            reason = True
+                            break
                         piece = delta.get("content") or None
                         if piece:
                             break
@@ -697,9 +771,13 @@ class QwenClient:
                     if piece is None:
                         piece = evt.get("content") or evt.get("text") or None
                     if isinstance(piece, str) and piece:
-                        full.append(piece)
-                        if on_delta:
-                            on_delta(piece)
+                        if reason:
+                            if on_reason:
+                                on_reason(piece)
+                        else:
+                            full.append(piece)
+                            if on_delta:
+                                on_delta(piece)
         except _StopStream:
             pass
         finally:
@@ -707,7 +785,7 @@ class QwenClient:
         if error:
             raise QwenError(error)
         if chat_id:
-            self._chat_id = chat_id
+            self._adopt_chat_id(chat_id)
         self._note_usage(usage)
         return "".join(full), usage, chat_id
 
@@ -721,7 +799,7 @@ class QwenClient:
         data = r.json().get("data", r.json())
         chat_id = data.get("chat_id") or self._chat_id
         if chat_id:
-            self._chat_id = chat_id
+            self._adopt_chat_id(chat_id)
         text = ""
         usage = {}
         if data.get("usage"):
@@ -784,6 +862,7 @@ class QwenClient:
             raise QwenError("Could not create a new chat.")
         self._chat_id = cid
         self._parent_id = None
+        self._parent_chat_id = None
         return cid
 
     def new_chat(self, title=""):
@@ -1183,8 +1262,8 @@ def _b64url(s):
     return base64.urlsafe_b64decode(s.encode()).decode()
 
 
-def cmd_status(args):
-    c = QwenClient()
+def cmd_status(args, client=None):
+    c = client or QwenClient()
     if not c.token:
         emsg("Not logged in. Run `qwen.py login` first.")
         return
@@ -1199,6 +1278,7 @@ def cmd_status(args):
         f"Email  : {who.get('email', 'n/a')}\n"
         f"Tier   : {who.get('tier', 'n/a')}\n"
         f"Model  : {c.model}\n"
+        f"Reason : {getattr(c, 'reasoning', 'auto')} (auto/thinking/fast)\n"
         f"Token  : {mask_token(c.token)}\n"
         f"Cookies: {'captured' if has_cookies() else 'none'} (needed for chat)\n"
         f"Chat   : {c._chat_id or 'new (not yet saved)'}",
@@ -1290,6 +1370,24 @@ def cmd_models(args):
     dim(f"\nDefault: {c.model}  (switch with /model or --model)")
 
 
+HISTORY_LIMIT = 12
+
+
+def _history_sorted(chats):
+    """Filter to dict chats with an id, newest-first by update/create time."""
+    chats = [ch for ch in chats if isinstance(ch, dict) and ch.get("id")]
+    chats.sort(key=lambda ch: ch.get("updated_at") or ch.get("created_at") or 0,
+               reverse=True)
+    return chats
+
+
+def _history_note(n, limited):
+    """Dim hint shown when the recent-conversation view is truncated."""
+    if limited:
+        dim(f"showing last {HISTORY_LIMIT} of {n} "
+            f"— use '/history full' to list all")
+
+
 def cmd_history(args):
     c = QwenClient()
     try:
@@ -1297,9 +1395,15 @@ def cmd_history(args):
     except QwenError as e:
         emsg(str(e))
         return
+    chats = _history_sorted(chats)
     if not chats:
         dim("No saved conversations.")
         return
+    full = bool(getattr(args, "full", False))
+    limited = not full and len(chats) > HISTORY_LIMIT
+    total = len(chats)
+    if limited:
+        chats = chats[:HISTORY_LIMIT]
     table = Table(title="Conversations", box=box.SIMPLE_HEAD) if _RICH else None
     rows = []
     for ch in chats:
@@ -1315,6 +1419,7 @@ def cmd_history(args):
     else:
         for cid, title, ts in rows:
             print(f"{cid}  {title:60} {ts}")
+    _history_note(total, limited)
     dim("\nResume with: qwen.py use <id>   or in REPL: /use <id>")
 
 
@@ -1323,6 +1428,182 @@ def _msg_answer(m):
         if e.get("phase") == "answer" and e.get("content"):
             return e["content"]
     return m.get("content") or ""
+
+
+def _grep_qwen_text(m):
+    """Extract grep-able text from a Qwen message."""
+    if m.get("role") == "assistant":
+        return _msg_answer(m)
+    return m.get("content") or ""
+
+
+def _grep_ds_text(m):
+    """Extract grep-able text from a DeepSeek message."""
+    return m.get("content") or ""
+
+
+def _grep_parse(tokens):
+    """Parse `/grep <pattern> [targets...]` / `grep` tokens into a spec.
+
+    The first token is the regex pattern. The rest recognise explicit chat ids
+    (space- or comma-separated), `-n N`/`--last N` (N most recent), `-a`/`--all`,
+    and `-i`/`--ignore-case`. Returns {'pattern', 'ids', 'last': int|None,
+    'all': bool, 'incase': bool}."""
+    ids = []
+    last = None
+    all_ = False
+    incase = False
+    pattern = None
+    toks = list(tokens)
+    if toks:
+        pattern, toks = toks[0], toks[1:]
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("-a", "--all"):
+            all_ = True
+        elif t in ("-i", "--ignore-case"):
+            incase = True
+        elif t in ("-n", "--last"):
+            i += 1
+            if i < len(toks) and toks[i].isdigit():
+                last = int(toks[i])
+        else:
+            ids.extend(x for x in t.replace(",", " ").split() if x)
+        i += 1
+    return {"pattern": pattern, "ids": ids, "last": last,
+            "all": all_, "incase": incase}
+
+
+def _grep_scope(get_list, spec):
+    """Resolve a grep spec to concrete chat ids (newest first).
+
+    Explicit ids pass through; `last=N` takes the first N of the app's
+    newest-first list; otherwise (no targets) everything is searched."""
+    ids = list(spec.get("ids") or [])
+    last = spec.get("last")
+    if last and last > 0:
+        try:
+            chat_list = _history_sorted(get_list() or [])
+        except Exception as e:
+            emsg(f"Failed to list conversations: {e}")
+            chat_list = []
+        ids.extend(ch.get("id") for ch in chat_list[:last]
+                   if isinstance(ch, dict) and ch.get("id"))
+    elif not ids and not last:
+        try:
+            chat_list = _history_sorted(get_list() or [])
+        except Exception as e:
+            emsg(f"Failed to list conversations: {e}")
+            chat_list = []
+        ids.extend(ch.get("id") for ch in chat_list
+                   if isinstance(ch, dict) and ch.get("id"))
+    return ids
+
+
+def _grep_compile(pattern, incase):
+    """Compile the user regex, or None when the pattern is empty/invalid."""
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern, re.IGNORECASE if incase else 0)
+    except re.error as e:
+        emsg(f"Bad pattern: {e}")
+        return None
+
+
+def _grep_matches(text, rx):
+    """Line-level matches: non-empty lines containing the pattern."""
+    return [(i, ln) for i, ln in enumerate(text.splitlines(), 1)
+            if ln.strip() and rx.search(ln)]
+
+
+def _grep_highlight(line, rx):
+    """Render a matching line, reversing matched spans when rich is available."""
+    if not _RICH:
+        return line
+    txt = Text(line)
+    for m in rx.finditer(line):
+        txt.stylize("bold reverse", m.start(), m.end())
+    return txt
+
+
+def _grep_emit(role_label, matches, rx):
+    """Print one message's matches; returns how many matched."""
+    count = 0
+    for lineno, line in matches:
+        if _RICH:
+            _console.print(f"[dim]{lineno:>4} [/dim][cyan]{role_label}:[/cyan]",
+                           _grep_highlight(line, rx))
+        else:
+            print(f"{lineno:>4} {role_label}: {line}")
+        count += 1
+    return count
+
+
+def _grep_conversation(cid, title, msgs, extract, rx):
+    """Grep one conversation's messages; returns total hit count."""
+    if not rx:
+        return 0
+    hits = 0
+    for m in msgs:
+        role = m.get("role")
+        if role == "user":
+            label = "You"
+        elif role == "assistant":
+            label = "Assistant"
+        else:
+            continue
+        hits += _grep_emit(label, _grep_matches(extract(m), rx), rx)
+    if hits:
+        cprint(f"\n[bold]{title or '(untitled)'}[/bold]  ({cid})")
+    return hits
+
+
+def _grep_run(get_list, get_chat, extract, spec):
+    """Run a grep across the resolved conversation scope.
+
+    `get_list` yields conversation summaries (dicts with id/title), `get_chat`
+    the transcript (`data["chat"]["messages"]` for Qwen, or a dict with
+    `messages` for DeepSeek). Chats that can't be read are skipped with a dim
+    note. Prints a `hits in matches of total` summary."""
+    if spec.get("pattern") is None:
+        emsg("usage: /grep <pattern> [chat_id ...] [-n N] [-a] [-i]")
+        return
+    rx = _grep_compile(spec["pattern"], spec.get("incase", False))
+    if not rx:
+        return
+    ids = _grep_scope(get_list, spec)
+    if not ids:
+        dim("No conversations to search.")
+        return
+    total = len(ids)
+    matched_chats = hits = 0
+    for cid in ids:
+        try:
+            data = get_chat(cid)
+        except Exception as e:
+            dim(f"{cid}: {e}")
+            continue
+        if not data or not data.get("id"):
+            dim(f"{cid}: no cached transcript")
+            continue
+        msgs = data.get("chat", {}).get("messages", data.get("messages") or [])
+        n = _grep_conversation(cid, data.get("title") or "", msgs, extract, rx)
+        if n:
+            hits += n
+            matched_chats += 1
+    okmsg(f"{hits} match(es) in {matched_chats} of {total} conversation(s).")
+
+
+def cmd_grep(args):
+    c = QwenClient()
+    spec = _grep_parse([args.pattern] + list(args.chat_id or []))
+    if getattr(args, "last", None) is not None:
+        spec["last"] = args.last
+    spec["all"] = spec["all"] or bool(getattr(args, "all", False))
+    spec["incase"] = spec["incase"] or bool(getattr(args, "ignore_case", False))
+    _grep_run(c.list_chats, c.get_chat, _grep_qwen_text, spec)
 
 
 def _print_conversation(data, full):
@@ -1447,18 +1728,127 @@ def cmd_use(args):
     repl(c, init_title=data.get("title") or "")
 
 
+def _latest_chat_id():
+    """Return the most recently updated conversation id, or None."""
+    c = QwenClient()
+    try:
+        chats = c.list_chats()
+    except QwenError as e:
+        emsg(str(e))
+        return None
+    chats = [ch for ch in chats if isinstance(ch, dict) and ch.get("id")]
+    if not chats:
+        return None
+    chats.sort(key=lambda ch: ch.get("updated_at") or ch.get("created_at") or 0,
+               reverse=True)
+    return chats[0]["id"]
+
+
+def _parse_del_spec(tokens):
+    """Split a delete-arguments token list (from `ds del`, `del`, or `/del`)
+    into a spec dict.
+
+    Accepts `-f`/`--force` (skip confirmation), `-n N`/`--last N` (delete the
+    N most recent conversations), and any number of explicit chat ids
+    (space- or comma-separated). Returns {'ids': [...], 'last': int|None,
+    'force': bool}."""
+    ids = []
+    last = None
+    force = False
+    toks = list(tokens)
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("-f", "--force"):
+            force = True
+        elif t in ("-n", "--last"):
+            i += 1
+            if i < len(toks) and toks[i].isdigit():
+                last = int(toks[i])
+        else:
+            ids.extend(x for x in t.replace(",", " ").split() if x)
+        i += 1
+    return {"ids": ids, "last": last, "force": force}
+
+
+def _del_targets(get_list_fn, spec):
+    """Resolve a delete spec to concrete chat ids using the app's list source.
+
+    Explicit ids pass through unchanged; `last=N` takes the first N entries of
+    the app's conversation list (newest first for DeepSeek). Returns
+    (ids, force)."""
+    ids = list(spec.get("ids") or [])
+    last = spec.get("last")
+    if last and last > 0:
+        try:
+            chat_list = get_list_fn() or []
+        except Exception as e:
+            emsg(f"Failed to list conversations: {e}")
+            chat_list = []
+        for ch in chat_list[:last]:
+            cid = ch.get("id") if isinstance(ch, dict) else ch
+            if cid:
+                ids.append(cid)
+    return ids, bool(spec.get("force"))
+
+
+def _bulk_delete(ids, delete_fn, active_id=None, force=False):
+    """Delete several conversations, reporting a summary.
+
+    Asks for confirmation when deleting more than one conversation unless
+    `force`. Returns (deleted, missing, active_gone) where active_gone is
+    True when `active_id` (e.g. the thread the REPL is on) was among them."""
+    if not ids:
+        emsg("Nothing to delete.")
+        return 0, 0, False
+    if len(ids) > 1 and not force:
+        shown = ", ".join(str(i) for i in ids[:5])
+        if len(ids) > 5:
+            shown += f", … (+{len(ids) - 5} more)"
+        if not ask_yes_no(f"Delete {len(ids)} conversation(s) ({shown})?", False):
+            dim("Cancelled.")
+            return 0, 0, False
+    deleted = missing = 0
+    active_gone = False
+    for cid in ids:
+        try:
+            ok = bool(delete_fn(cid))
+        except Exception as e:
+            emsg(f"{cid}: {e}")
+            continue
+        if ok:
+            deleted += 1
+            if active_id and str(cid) == str(active_id):
+                active_gone = True
+        else:
+            missing += 1
+            dim(f"{cid}: not found")
+    if deleted:
+        okmsg(f"Deleted {deleted}/{len(ids)} conversation(s).")
+    if missing:
+        emsg(f"{missing} conversation(s) not found.")
+    return deleted, missing, active_gone
+
+
 def cmd_delete(args):
     c = QwenClient()
-    if args.force or ask_yes_no(f"Delete conversation {args.chat_id}?", False):
-        okmsg("Deleted.") if c.delete_chat(args.chat_id) else emsg("Delete failed.")
-    else:
-        dim("Cancelled.")
+    spec = _parse_del_spec(args.chat_id)
+    if getattr(args, "last", None) is not None:
+        spec["last"] = args.last
+    spec["force"] = spec["force"] or getattr(args, "force", False)
+    ids, force = _del_targets(c.list_chats, spec)
+    if not ids:
+        emsg("usage: qwen.py del <chat_id>... [-n N] [-f]")
+        return
+    _bulk_delete(ids, c.delete_chat, force=force)
 
 
 def cmd_ask(args):
     c = QwenClient()
     if args.model:
         c.model = args.model
+    if getattr(args, "reasoning", None):
+        c.reasoning = args.reasoning
     if not c.token:
         emsg("Not logged in. Run `qwen.py login` first.")
         return
@@ -1476,7 +1866,8 @@ def cmd_ask(args):
             emsg(str(e))
             return
     if not getattr(args, "no_stream", False):
-        full, usage, chat_id = c.stream_chat(text, on_delta=_stream_write)
+        full, usage, chat_id = c.stream_chat(text, on_delta=_stream_write,
+                                             on_reason=_make_reason_writer())
         print()
     else:
         full, usage, chat_id = c.nonstream_chat(text)
@@ -1619,6 +2010,14 @@ def cmd_ds(args):
         import os
         os.environ["DEEPSEEK_BASE_URL"] = base
     c = deepseek_client.DeepSeekSession(model=model)
+    # Seed the session toggles from explicit CLI flags only (`--thinking` /
+    # `--search`); a resumed conversation (`-c`, use) then restores its own
+    # stored state, and an absent flag leaves the thread state untouched,
+    # matching the web UI's per-conversation buttons.
+    if getattr(args, "thinking", None) is not None:
+        c.thinking = args.thinking
+    if getattr(args, "search", None) is not None:
+        c.search = args.search
 
     # Attach any --upload files before a conversation starts (ask/chat/use).
     if getattr(args, "upload", None) and args.sub in ("ask", "chat", "use"):
@@ -1639,6 +2038,26 @@ def cmd_ds(args):
             c.close()
         return
 
+    # `-c` continues the most recent saved conversation into the REPL (works
+    # from either position: `qwen.py ds -c` or `qwen.py -c ds`).
+    if getattr(args, "continue_ds", False) or getattr(args, "continue_", False):
+        if args.sub in ("ask", "chat"):
+            latest = next((ch["id"] for ch in c.store.list() if ch.get("id")), None)
+            if latest:
+                try:
+                    data = c.use_chat(latest)
+                    okmsg(f"Resumed last conversation {latest} — "
+                          f"{data.get('title') or '(untitled)'}")
+                    _warn_ds_pending(data)
+                    ds_repl(c, args, init_title=data.get("title") or "")
+                except deepseek_client.DeepSeekError as e:
+                    emsg(str(e))
+                c.close()
+                return
+            warn("No saved DeepSeek conversations.")
+        else:
+            dim("-c ignored for sub '{}' (only ask/chat).".format(args.sub))
+
     if args.sub == "chat":
         ds_repl(c, args)
         c.close()
@@ -1650,6 +2069,12 @@ def cmd_ds(args):
             dim("No saved conversations.")
             c.close()
             return
+        rest = getattr(args, "rest", None) or []
+        full = "-f" in rest or "--full" in rest or "full" in rest
+        limited = not full and len(chats) > HISTORY_LIMIT
+        total = len(chats)
+        if limited:
+            chats = chats[:HISTORY_LIMIT]
         if not c.online_ok:
             dim("(local only — online unreachable)")
         table = Table(title="DeepSeek conversations", box=box.SIMPLE_HEAD) if _RICH else None
@@ -1668,6 +2093,7 @@ def cmd_ds(args):
         else:
             for cid_, title, ts, model in rows:
                 print(f"{cid_}  {title:50} {ts}  {model}")
+        _history_note(total, limited)
         c.close()
         return
 
@@ -1695,6 +2121,7 @@ def cmd_ds(args):
         try:
             data = c.use_chat(chat_id)
             okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
+            _warn_ds_pending(data)
             ds_repl(c, args, init_title=data.get("title") or "")
         except deepseek_client.DeepSeekError as e:
             emsg(str(e))
@@ -1702,18 +2129,65 @@ def cmd_ds(args):
         return
 
     if args.sub == "del":
-        if not args.rest or not args.rest[0]:
-            emsg("usage: qwen.py ds del <chat_id>")
+        spec = _parse_del_spec(args.rest)
+        if getattr(args, "last", None) is not None:
+            spec["last"] = args.last
+        spec["force"] = spec["force"] or getattr(args, "force", False)
+        ids, force = _del_targets(c.list_chats, spec)
+        if not ids:
+            emsg("usage: qwen.py ds del <chat_id> [<chat_id> ...] [-n N] [-f]")
             c.close()
             return
-        chat_id = args.rest[0]
-        try:
-            if c.delete_chat(chat_id):
-                okmsg(f"Deleted conversation {chat_id}.")
-            else:
-                emsg(f"Conversation {chat_id} not found.")
-        except deepseek_client.DeepSeekError as e:
-            emsg(str(e))
+        _bulk_delete(ids, c.delete_chat, force=force)
+        c.close()
+        return
+
+    if args.sub == "grep":
+        spec = _grep_parse(args.rest)
+        if getattr(args, "last", None) is not None:
+            spec["last"] = args.last
+        spec["all"] = spec["all"] or bool(getattr(args, "all", False))
+        spec["incase"] = spec["incase"] or bool(getattr(args, "ignore_case", False))
+        if spec.get("pattern") is None:
+            emsg("usage: qwen.py ds grep <pattern> [chat_id ...] [-n N] [-a] [-i]")
+            c.close()
+            return
+        _grep_run(c.list_chats, c.get_chat, _grep_ds_text, spec)
+        c.close()
+        return
+
+    if args.sub == "view":
+        if not args.rest or not args.rest[0]:
+            emsg("usage: qwen.py ds view <chat_id>")
+            c.close()
+            return
+        cid = args.rest[0]
+        chat = c.get_chat(cid)
+        if not chat:
+            _maybe_online_ds_chat(c, cid)
+        else:
+            _print_ds_chat(chat, True)
+            _offer_ds_code_saves(c, cid)
+        c.close()
+        return
+
+    if args.sub == "print":
+        parts = list(args.rest or [])
+        full = bool(parts) and parts[0].lower() in ("full", "true", "1", "y")
+        if full:
+            parts = parts[1:]
+        if not parts:
+            emsg("usage: qwen.py ds print [full] <chat_id>")
+            c.close()
+            return
+        cid = parts[0]
+        chat = c.get_chat(cid)
+        if not chat:
+            _maybe_online_ds_chat(c, cid)
+        else:
+            _print_ds_chat(chat, full)
+            if full:
+                _offer_ds_code_saves(c, cid)
         c.close()
         return
 
@@ -1725,12 +2199,12 @@ def cmd_ds(args):
         return
     try:
         if args.no_stream:
-            ftx, cid, usage = c.chat_once(msg, thinking=args.thinking,
-                                          search=args.search)
+            ftx, cid, usage = c.chat_once(msg, thinking=c.thinking,
+                                          search=c.search)
             cprint(ftx)
         else:
             ftx, cid, usage = c.stream_chat(
-                msg, thinking=args.thinking, search=args.search,
+                msg, thinking=c.thinking, search=c.search,
                 on_delta=_stream_write)
             print()
         _show_links(ftx)
@@ -1757,16 +2231,19 @@ Commands:
   /multi           toggle multiline input (end with a blank line)
   /status          current model + conversation
   /think           toggle DeepThink for subsequent messages
+  /search          toggle web search for subsequent messages
   /history         list saved conversations (synced from the online account)
+  /grep <pattern> [ids...] [-n N | -a]  search conversations (default: all)
   /sync            refresh from online: prune deleted, add missing, fix titles
   /use <id>        resume a saved conversation
   /view <id>       print a conversation + offer to save code blocks
   /download        save the code blocks from the last reply (or /download <id>)
   /print [full]    print current or given conversation (short unless 'full')
   /rename <title>  rename current conversation
-  /del <id>        delete a saved conversation
+  /del <id>... [-n N] [-f] delete conversations (ids or the N most recent)
   /save <path>     export this chat to .md — /save <id> [path] exports a stored chat
-  /token           show the proxy address in use
+  /status          current thread — model, conversation_id, turns
+  /show :info      current thread incl. origin (forked from <id>?)
   /run <cmd> [--net] [--timeout N] run sandboxed and feed result to the model
   /exit, /quit     leave
   !<cmd>            run locally in your shell (no sandbox, no policy)
@@ -1775,14 +2252,57 @@ Links appearing in replies are listed automatically below the answer.
 """)
 
 
-def _input_multiline(first_prompt, cont_prompt="  ... "):
+def _prompt_input(prompt):
+    """input() that renders rich markup so REPL prompts can be colored. Falls
+    back to plain input() when rich isn't available (markup read literally)."""
+    if _RICH:
+        return _console.input(prompt)
+    return input(prompt)
+
+
+def _repl_prompt(model, conv_title="", thinking=None, search=None,
+                 reasoning=None):
+    """Colored REPL prompt. Model in bold cyan, conversation title in dim
+    yellow when active, plus full-state markers for the toggles the REPL uses:
+    [think:on|off], [search:on|off] (DeepSeek) and [reason:auto|thinking|fast]
+    (Qwen). A toggle left as None (`thinking`/`search`) means "not applicable"
+    and renders no marker. Falls back to plain text when rich isn't available."""
+    flags = ""
+    if thinking is not None:
+        if thinking:
+            flags += "[magenta][think:on][/magenta]"
+        else:
+            flags += "[dim][think:off][/dim]"
+    if search is not None:
+        if search:
+            flags += "[cyan][search:on][/cyan]"
+        else:
+            flags += "[dim][search:off][/dim]"
+    if reasoning is not None:
+        flags += "[green][reason:{}][/green]".format(reasoning or "auto")
+    if _RICH:
+        title = f"[yellow]{conv_title}[/yellow]" if conv_title else ""
+        sep = "[dim]|[/dim]" if title else ""
+        return f"\n[bold cyan]{model}[/bold cyan]{sep}{title}{flags} [bold]>[/bold] "
+    title = f"| {conv_title}" if conv_title else ""
+    plain = f"{model}{title}"
+    if thinking is not None:
+        plain += f"(think:{'on' if thinking else 'off'})"
+    if search is not None:
+        plain += f"(search:{'on' if search else 'off'})"
+    if reasoning is not None:
+        plain += f"(reason:{reasoning or 'auto'})"
+    return f"\n{plain}> "
+
+
+def _input_multiline(first_prompt, cont_prompt="[dim]  ... [/dim]"):
     """Read a multiline message. The first prompt is shown for the first line,
     then a continuation prompt until a blank line (or Ctrl-D) ends it.
     Ctrl-C aborts and returns "". Returns the joined message."""
     lines: list[str] = []
     try:
         while True:
-            line = input(first_prompt if not lines else cont_prompt)
+            line = _prompt_input(first_prompt if not lines else cont_prompt)
             if not line:
                 break
             lines.append(line)
@@ -1805,15 +2325,12 @@ def ds_repl(c, args, init_title=""):
     multiline = False
     last_reply = ""
     while True:
-        if conv_title:
-            prompt = f"\n[{c.model}|{conv_title}] "
-        else:
-            prompt = f"\n[{c.model}] "
+        prompt = _repl_prompt(c.model, conv_title, c.thinking, c.search)
         if multiline:
             user = _input_multiline(prompt).strip()
         else:
             try:
-                user = input(prompt).strip()
+                user = _prompt_input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -1878,8 +2395,12 @@ def ds_repl(c, args, init_title=""):
                 okmsg("Cleared attachments.")
             elif cmd == "think":
                 # toggle DeepThink in-session; ask/chat default off.
-                args.thinking = not args.thinking
-                okmsg(f"DeepThink {'on' if args.thinking else 'off'}")
+                c.thinking = not c.thinking
+                okmsg(f"DeepThink {'on' if c.thinking else 'off'}")
+            elif cmd == "search":
+                # toggle web search in-session; ask/chat default off.
+                c.search = not c.search
+                okmsg(f"WebSearch {'on' if c.search else 'off'}")
             elif cmd in ("new", "reset"):
                 c.new_conversation()
                 conv_title = ""
@@ -1887,16 +2408,41 @@ def ds_repl(c, args, init_title=""):
             elif cmd == "status":
                 dim(f"model: {c.model} | base: {c.base_url}" if _RICH
                     else f"model: {c.model}  base: {c.base_url}")
+                dim(f"DeepThink: {'on' if c.thinking else 'off'}   "
+                    f"WebSearch: {'on' if c.search else 'off'}")
                 if c.conversation_id:
                     dim(f"conversation_id: {c.conversation_id}")
                     dim(f"turns in thread: {len(c.log) // 2}")
                 else:
                     dim("no conversation yet — send a message")
+            elif cmd in ("show",):
+                # /show :info — current thread info incl. fork origin
+                cid = _cid_key(c)
+                if not cid:
+                    emsg("no conversation yet — send a message first")
+                    continue
+                main = c.get_chat(cid) or {}
+                print(f"current thread: {cid}")
+                if main.get("title"):
+                    print(f"  title:        {main['title']}")
+                print(f"  model:        {c.model}")
+                print(f"  turns:        {len(c.log) // 2}")
+                print(f"  attachments:  {len(c.attachments)}")
+                if c._forked_from:
+                    old = _cid_key(c._forked_from)
+                    print(f"  forked from:  {old}  (resume with /use {old})")
+                else:
+                    print("  forked from:  (this thread)")
             elif cmd == "history":
                 chats = c.list_chats()
                 if not chats:
                     dim("No saved conversations.")
                     continue
+                full = arg.strip().lower() in ("full", "all")
+                limited = not full and len(chats) > HISTORY_LIMIT
+                total = len(chats)
+                if limited:
+                    chats = chats[:HISTORY_LIMIT]
                 if not c.online_ok:
                     dim("(local only — online unreachable)")
                 table = Table(title="DeepSeek conversations", box=box.SIMPLE_HEAD) if _RICH else None
@@ -1915,6 +2461,7 @@ def ds_repl(c, args, init_title=""):
                 else:
                     for cid_, title, ts, model in rows:
                         print(f"{cid_}  {title:50} {ts}  {model}")
+                _history_note(total, limited)
             elif cmd == "sync":
                 try:
                     s = c.sync_chats()
@@ -1929,6 +2476,7 @@ def ds_repl(c, args, init_title=""):
                     data = c.use_chat(arg)
                     conv_title = data.get("title") or ""
                     okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
+                    _print_ds_chat(data, False)
                 except deepseek_client.DeepSeekError as e:
                     emsg(str(e))
             elif cmd == "print":
@@ -1990,19 +2538,29 @@ def ds_repl(c, args, init_title=""):
                             emsg("No conversation to rename — send a message first.")
                     except deepseek_client.DeepSeekError as e:
                         emsg(str(e))
+            elif cmd == "grep":
+                spec = _grep_parse(arg.split())
+                if spec.get("pattern") is None:
+                    emsg("usage: /grep <pattern> [chat_id ...] [-n N] [-a] [-i]")
+                    continue
+                _grep_run(c.list_chats, c.get_chat, _grep_ds_text, spec)
             elif cmd == "del":
-                if not arg:
-                    emsg("usage: /del <chat_id>")
-                else:
-                    try:
-                        if c.delete_chat(arg):
-                            if arg == _cid_key(c):
-                                conv_title = ""
-                            okmsg("Deleted.")
-                        else:
-                            emsg(f"Conversation {arg} not found.")
-                    except deepseek_client.DeepSeekError as e:
-                        emsg(str(e))
+                spec = _parse_del_spec(arg.split())
+                if not spec["ids"] and not spec["last"]:
+                    emsg("usage: /del <chat_id> [<chat_id> ...] [-n N] [-f]")
+                    continue
+                ids, force = _del_targets(c.list_chats, spec)
+                if not ids:
+                    emsg("Nothing to delete.")
+                    continue
+                try:
+                    _, _, active_gone = _bulk_delete(
+                        ids, c.delete_chat, active_id=_cid_key(c), force=force)
+                except deepseek_client.DeepSeekError as e:
+                    emsg(str(e))
+                    continue
+                if active_gone:
+                    conv_title = ""
             elif cmd == "save":
                 # /save          -> export the current conversation to .md
                 # /save <path>   -> same, explicit path
@@ -2081,10 +2639,10 @@ def ds_repl(c, args, init_title=""):
                 try:
                     if args.no_stream:
                         ftx, cid, usage = c.chat_once(
-                            user, thinking=args.thinking, search=args.search)
+                            user, thinking=c.thinking, search=c.search)
                     else:
                         ftx, cid, usage = c.stream_chat(
-                            user, thinking=args.thinking, search=args.search,
+                            user, thinking=c.thinking, search=c.search,
                             on_delta=_stream_write)
                         print()
                 except deepseek_client.DeepSeekError as e:
@@ -2092,6 +2650,7 @@ def ds_repl(c, args, init_title=""):
                     continue
                 _show_links(ftx)
                 _usage_line(usage, cid)
+                _show_fork_notice(c)
             else:
                 warn(f"Unknown command /{cmd}. Try /help.")
             continue
@@ -2099,11 +2658,11 @@ def ds_repl(c, args, init_title=""):
         cprint("[magenta]DeepSeek:[/magenta]")
         try:
             if args.no_stream:
-                ftx, cid, usage = c.chat_once(user, thinking=args.thinking, search=args.search)
+                ftx, cid, usage = c.chat_once(user, thinking=c.thinking, search=c.search)
                 markdown(ftx)
             else:
                 ftx, cid, usage = c.stream_chat(
-                    user, thinking=args.thinking, search=args.search,
+                    user, thinking=c.thinking, search=c.search,
                     on_delta=_stream_write)
                 print()
         except deepseek_client.DeepSeekError as e:
@@ -2112,11 +2671,8 @@ def ds_repl(c, args, init_title=""):
         _show_links(ftx)
         last_reply = ftx
         _dl_hint(ftx)
-        if c.forked:
-            dim("Started a new forked thread (file attached to a running "
-                "conversation). The old thread is preserved in /history.")
-            c.forked = False
-        if cid:
+        _show_fork_notice(c)
+        if not c.forked and cid:
             dim(f"(conversation {_cid_key(c)})")
         if not conv_title:
             stored = c.get_chat(_cid_key(c)) or {}
@@ -2124,13 +2680,48 @@ def ds_repl(c, args, init_title=""):
 
 
 def _cid_key(c):
-    """Stable chat id for the current DeepSeek thread (session uuid)."""
-    return (c.conversation_id or "").split(":", 1)[0]
+    """Stable chat id for the current DeepSeek thread (session uuid). Accepts
+    the session object or a raw conversation_id string."""
+    s = c.conversation_id if hasattr(c, "conversation_id") else c
+    return (s or "").split(":", 1)[0]
+
+
+def _show_fork_notice(c):
+    """After a reply that forked the thread (file attached to a running
+    conversation), print the new and old thread ids and clear the flags."""
+    if not c.forked:
+        return
+    new_id = _cid_key(c)
+    old_id = _cid_key(c._forked_from or "")
+    dim("Started a new forked thread (file attached to a running "
+        "conversation). The old thread is preserved in /history.")
+    if old_id:
+        okmsg(f"new thread: {new_id}   old thread: {old_id}  → /use {old_id}")
+    else:
+        dim(f"(conversation {new_id})")
+    c.forked = False
+    c._forked_from = None
+
+
+def _warn_ds_pending(chat):
+    """Warn that a conversation's last reply was interrupted (partial text was
+    still persisted). Re-asking the same prompt resumes the finished part."""
+    if chat and chat.get("reply_pending"):
+        warn("Last reply was interrupted — its partial text is saved. "
+             "Send the same prompt again to continue from there.")
 
 
 def _print_ds_chat(chat, full):
     """Render a DeepSeek conversation (same shape as _print_conversation)."""
-    cprint(f"[bold]{chat.get('title') or '(untitled)'}[/bold]  ({chat.get('id')})")
+    flags = []
+    if chat.get("thinking"):
+        flags.append("think")
+    if chat.get("search"):
+        flags.append("search")
+    suffix = f"  [{'/'.join(flags)}]" if flags else ""
+    cprint(f"[bold]{chat.get('title') or '(untitled)'}[/bold]  "
+           f"({chat.get('id')}){suffix}")
+    _warn_ds_pending(chat)
     limit = None if full else 3
     for m in chat.get("messages") or []:
         role = m.get("role")
@@ -2144,6 +2735,22 @@ def _print_ds_chat(chat, full):
             _show_links(content)
 
 
+def _maybe_online_ds_chat(c, cid):
+    """When a chat id isn't in the local store, check the online account so
+    `ds view`/`ds print` stay useful for server-side-only sessions. No model call."""
+    try:
+        online = {s.get("id"): s for s in (c._online_chats() or []) if s.get("id")}
+    except Exception:
+        online = {}
+    s = online.get(cid)
+    if s:
+        cprint(f"[bold]{s.get('title') or '(untitled)'}[/bold]  ({cid})")
+        dim("Session exists online — transcript not cached locally; "
+            "use `ds sync` / `ds history` to materialize it.")
+        return
+    emsg(f"Conversation {cid} not found.")
+
+
 def _repl_help():
     print("""
 Commands:
@@ -2155,14 +2762,17 @@ Commands:
   /clearfiles      clear attached files
   /new             start a fresh conversation
   /multi           toggle multiline input (end with a blank line)
-  /status          account + tokens used this session
+  /status          account + current thread (session id, forked parent)
+  /parent          jump back to the thread this one was forked from
   /history         list saved conversations
+  /grep <pattern> [ids...] [-n N | -a]  search conversations (default: all)
   /use <id>        resume a saved conversation
   /view <id>       print a conversation + offer to save code blocks
   /download        save the code blocks from the last reply (or /download <id>)
   /print [full]    print current or given conversation (short unless 'full')
   /rename <title>  rename current conversation
-  /del <id>        delete a conversation
+  /del <id>... [-n N] [-f] delete conversations (ids or the N most recent)
+  /reason [auto|thinking|fast]  reasoning mode (no arg cycles)
   /save <path>     export conversation to .md — /save <id> [path] exports a stored chat
   /token           show stored token (masked)
   /exit, /quit     leave
@@ -2276,15 +2886,13 @@ def repl(client, init_title=""):
     last_reply = ""
 
     while True:
-        if conv_title:
-            prompt = f"\n[{client.model}|{conv_title}] "
-        else:
-            prompt = f"\n[{client.model}] "
+        prompt = _repl_prompt(client.model, conv_title,
+                              reasoning=getattr(client, "reasoning", "auto"))
         if multiline:
             user = _input_multiline(prompt).strip()
         else:
             try:
-                user = input(prompt).strip()
+                user = _prompt_input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -2338,10 +2946,28 @@ def repl(client, init_title=""):
                 conv_title = ""
                 okmsg(f"New conversation: {client._chat_id}")
             elif cmd == "status":
-                cmd_status(argparse.Namespace())
+                cmd_status(argparse.Namespace(), client)
+                dim(f"session id: {client._chat_id or 'new (not yet saved)'}")
+                if client._parent_chat_id:
+                    dim(f"parent id:  {client._parent_chat_id}  (→ /parent)")
                 dim(f"Tokens used this session: {client.tokens_used}")
+            elif cmd == "reason":
+                opt = arg.strip().lower()
+                cycle = {"auto": "thinking", "thinking": "fast", "fast": "auto"}
+                if not opt:
+                    client.reasoning = cycle.get(client.reasoning, "auto")
+                elif opt in ("a", "auto"):
+                    client.reasoning = "auto"
+                elif opt in ("t", "thinking", "think"):
+                    client.reasoning = "thinking"
+                elif opt in ("f", "fast"):
+                    client.reasoning = "fast"
+                else:
+                    emsg("usage: /reason [auto|thinking|fast] (no arg cycles)")
+                    continue
+                okmsg(f"Reasoning: {client.reasoning}")
             elif cmd == "history":
-                cmd_history(argparse.Namespace())
+                cmd_history(argparse.Namespace(full=arg.strip().lower() in ("full", "all")))
             elif cmd == "use":
                 if not arg:
                     emsg("usage: /use <chat_id>")
@@ -2349,7 +2975,20 @@ def repl(client, init_title=""):
                 try:
                     data = client.use_chat(arg)
                     conv_title = data.get("title") or ""
+                    client._parent_chat_id = None
                     okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
+                except QwenError as e:
+                    emsg(str(e))
+            elif cmd == "parent":
+                parent = client._parent_chat_id
+                if not parent:
+                    warn("No forked parent — this is a root thread.")
+                    continue
+                try:
+                    data = client.use_chat(parent)
+                    client._parent_chat_id = None
+                    conv_title = data.get("title") or ""
+                    okmsg(f"Back to parent: {data.get('title') or '(untitled)'}")
                 except QwenError as e:
                     emsg(str(e))
             elif cmd == "view":
@@ -2411,12 +3050,27 @@ def repl(client, init_title=""):
                     okmsg("Renamed.")
                 else:
                     emsg("No conversation yet — send a message first.")
+            elif cmd == "grep":
+                spec = _grep_parse(arg.split())
+                if spec.get("pattern") is None:
+                    emsg("usage: /grep <pattern> [chat_id ...] [-n N] [-a] [-i]")
+                    continue
+                _grep_run(client.list_chats, client.get_chat, _grep_qwen_text, spec)
             elif cmd == "del":
-                if not arg:
-                    emsg("usage: /del <chat_id>")
-                else:
-                    client.delete_chat(arg)
-                    okmsg("Deleted.")
+                spec = _parse_del_spec(arg.split())
+                if not spec["ids"] and not spec["last"]:
+                    emsg("usage: /del <chat_id> [<chat_id> ...] [-n N] [-f]")
+                    continue
+                ids, force = _del_targets(client.list_chats, spec)
+                if not ids:
+                    emsg("Nothing to delete.")
+                    continue
+                _, _, active_gone = _bulk_delete(
+                    ids, client.delete_chat,
+                    active_id=getattr(client, "_chat_id", None), force=force)
+                if active_gone:
+                    client._chat_id = None
+                    conv_title = ""
             elif cmd == "save":
                 # /save          -> export the current conversation to .md
                 # /save <path>   -> same, explicit path
@@ -2534,7 +3188,8 @@ def repl(client, init_title=""):
                 cprint("[cyan]Qwen:[/cyan]")
                 try:
                     full, usage, chat_id = client.stream_chat(
-                        user, on_delta=_stream_write)
+                        user, on_delta=_stream_write,
+                        on_reason=_make_reason_writer())
                     print()
                 except QwenError as e:
                     emsg(str(e))
@@ -2553,7 +3208,8 @@ def repl(client, init_title=""):
         transcript.append(("user", user))
         cprint("[cyan]Qwen:[/cyan]")
         try:
-            full, usage, chat_id = client.stream_chat(user, on_delta=_stream_write)
+            full, usage, chat_id = client.stream_chat(
+                user, on_delta=_stream_write, on_reason=_make_reason_writer())
             print()
         except QwenError as e:
             emsg(str(e))
@@ -2929,6 +3585,9 @@ def main():
     )
     parser.add_argument("--dl-dir", default=None,
                         help="base directory for /download (default: ./downloads)")
+    parser.add_argument("-c", "--continue", dest="continue_", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="resume the most recent conversation instead of starting a new one")
     sub = parser.add_subparsers(dest="command")
 
     p_login = sub.add_parser("login", help="login / capture a session")
@@ -2943,13 +3602,29 @@ def main():
     sub.add_parser("token", help="show stored token (masked)")
     sub.add_parser("status", help="account, quota and usage")
     sub.add_parser("models", help="list models")
-    sub.add_parser("history", help="list saved conversations")
+    p_history = sub.add_parser("history", help="list saved conversations (last 12)")
+    p_history.add_argument("-f", "--full", action="store_true",
+                           help="list all saved conversations")
+
+    p_grep = sub.add_parser("grep", help="search saved conversations (one, or all)")
+    p_grep.add_argument("pattern", help="regular expression to search for")
+    p_grep.add_argument("chat_id", nargs="*", metavar="chat_id",
+                        help="conversation(s) to search (default: all)")
+    p_grep.add_argument("-n", "--last", type=int, default=None,
+                        help="search the N most recent conversations")
+    p_grep.add_argument("-a", "--all", action="store_true",
+                        help="search every conversation")
+    p_grep.add_argument("-i", "--ignore-case", action="store_true",
+                        help="case-insensitive matching")
     sub.add_parser("new", help="start a fresh conversation")
     p_use = sub.add_parser("use", help="resume a conversation")
     p_use.add_argument("chat_id")
-    p_del = sub.add_parser("del", help="delete a conversation")
-    p_del.add_argument("chat_id")
-    p_del.add_argument("-f", "--force", action="store_true")
+    p_del = sub.add_parser("del", help="delete conversations (ids or -n N)")
+    p_del.add_argument("chat_id", nargs="*")
+    p_del.add_argument("-n", "--last", type=int, default=None,
+                       help="delete the N most recent conversations")
+    p_del.add_argument("-f", "--force", action="store_true",
+                       help="skip the bulk-delete confirmation")
     sub.add_parser("logout", help="logout and clear stored token")
 
     p_ask = sub.add_parser("ask", help="one-shot question")
@@ -2958,24 +3633,44 @@ def main():
     p_ask.add_argument("-u", "--upload", action="append", metavar="PATH",
                        help="attach a file (repeatable)")
     p_ask.add_argument("--no-stream", action="store_true", help="disable streaming output")
+    p_ask.add_argument("--reasoning", choices=("auto", "thinking", "fast"),
+                       default=None, help="reasoning mode (default: env QWEN_REASONING or auto)")
 
     # DeepSeek via the local Deepseek-API proxy (`python app.py` in Deepseek-API/).
     p_ds = sub.add_parser("ds", help="talk to DeepSeek via the local proxy")
     p_ds.add_argument("sub", nargs="?", default="ask",
-                      help="action: ask, chat, models, history, sync, new, use, del ")
+                      help="action: ask, chat, models, history, sync, new, use, view, print, del, grep ")
     p_ds.add_argument("rest", nargs="*", default=[],
-                      help="chat id (for use/del) or your question (for ask)")
+                      help="chat id (for use/view/del/grep) or your question (for ask)")
     p_ds.add_argument("-m", "--model", default=None,
                       help=f"model to use (default: {DEFAULT_MODEL})")
-    p_ds.add_argument("--thinking", action="store_true", help="enable DeepThink reasoning")
-    p_ds.add_argument("--search", action="store_true", help="enable web search")
+    p_ds.add_argument("--thinking", action="store_true", default=argparse.SUPPRESS,
+                      help="enable DeepThink (defaults to the thread's state)")
+    p_ds.add_argument("--search", action="store_true", default=argparse.SUPPRESS,
+                      help="enable web search (defaults to the thread's state)")
     p_ds.add_argument("--no-stream", action="store_true", help="disable streaming output")
     p_ds.add_argument("-u", "--upload", action="append", metavar="PATH",
                       help="attach a file before asking (repeatable)")
+    p_ds.add_argument("-n", "--last", type=int, default=None,
+                      help="delete the N most recent (del) or search the N most recent (grep)")
+    p_ds.add_argument("-f", "--force", action="store_true",
+                      help="skip the bulk-delete confirmation (with the del action)")
+    p_ds.add_argument("-a", "--all", action="store_true",
+                      help="search every conversation (with the grep action)")
+    p_ds.add_argument("-i", "--ignore-case", action="store_true",
+                      help="case-insensitive matching (with the grep action)")
     p_ds.add_argument("-b", "--base-url", default=None,
                       help="proxy base URL (default: $DEEPSEEK_BASE_URL or http://localhost:8000)")
+    p_ds.add_argument("-c", "--continue", dest="continue_ds", action="store_true",
+                      default=argparse.SUPPRESS,
+                      help="resume the most recent DeepSeek conversation into the REPL")
 
-    sub.add_parser("chat", help="interactive REPL (default)")
+    p_chat = sub.add_parser("chat", help="interactive REPL (default)")
+    p_chat.add_argument("-c", "--continue", dest="continue_", action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="resume the most recent conversation instead of starting a new one")
+    p_chat.add_argument("--reasoning", choices=("auto", "thinking", "fast"),
+                        default=None, help="reasoning mode (default: env QWEN_REASONING or auto)")
 
     p_view = sub.add_parser("view", help="print a saved conversation's messages")
     p_view.add_argument("chat_id")
@@ -3053,6 +3748,8 @@ def main():
         cmd_view(args)
     elif cmd == "del":
         cmd_delete(args)
+    elif cmd == "grep":
+        cmd_grep(args)
     elif cmd == "logout":
         QwenClient().logout()
         okmsg("Logged out.")
@@ -3070,6 +3767,8 @@ def main():
         cmd_ds(args)
     else:
         client = QwenClient()
+        if getattr(args, "reasoning", None):
+            client.reasoning = args.reasoning
         if not client.token:
             if _has_display():
                 warn("Not logged in. Run `qwen.py login` first — or press Ctrl+C.")
@@ -3085,6 +3784,19 @@ def main():
                 warn("No token stored and no display available (headless).")
                 warn("Store a session with: qwen.py login --cookie '<header>' [--token <JWT>]")
                 return
+        if getattr(args, "continue_", False):
+            last = _latest_chat_id()
+            if last:
+                try:
+                    data = client.use_chat(last)
+                    okmsg(f"Resumed last conversation {last} — "
+                          f"{data.get('title') or '(untitled)'}")
+                    repl(client, init_title=data.get("title") or "")
+                    return
+                except QwenError as e:
+                    emsg(str(e))
+            else:
+                warn("-c: no saved conversations to resume — starting a new one.")
         repl(client)
 
 
