@@ -1388,6 +1388,26 @@ def _history_note(n, limited):
             f"— use '/history full' to list all")
 
 
+def _msgs_label(ch=None, c=None, cid=None):
+    """Return a '(N)' message-count label for a chat summary row ('(?)' if unknown)."""
+    if isinstance(ch, dict):
+        m = ch.get("messages")
+        if isinstance(m, list):
+            return "({})".format(len(m))
+        if m is not None:
+            return "({})".format(int(m) if str(m).isdigit() else "?")
+    if c is not None and cid is not None:
+        try:
+            d = c.get_chat(cid)
+        except Exception:
+            return "(?)"
+        if d:
+            m = d.get("chat", {}).get("messages")
+            if isinstance(m, list):
+                return "({})".format(len(m))
+    return "(?)"
+
+
 def cmd_history(args):
     c = QwenClient()
     try:
@@ -1411,14 +1431,15 @@ def cmd_history(args):
             ch.get("id", "?"),
             (ch.get("title") or "(untitled)")[:60],
             datetime.fromtimestamp(int(ch.get("created_at", 0)), timezone.utc).strftime("%Y-%m-%d %H:%M") if ch.get("created_at") else "?",
+            _msgs_label(ch=ch, c=c, cid=ch.get("id")),
         ))
     if table:
-        for cid, title, ts in rows:
-            table.add_row(cid, title, ts)
+        for cid, title, ts, label in rows:
+            table.add_row(cid, title, ts, label)
         _console.print(table)
     else:
-        for cid, title, ts in rows:
-            print(f"{cid}  {title:60} {ts}")
+        for cid, title, ts, label in rows:
+            print(f"{cid}  {title:60} {ts}  {label}")
     _history_note(total, limited)
     dim("\nResume with: qwen.py use <id>   or in REPL: /use <id>")
 
@@ -1725,7 +1746,8 @@ def cmd_use(args):
         return
     title = data.get("title") or "(untitled)"
     okmsg(f"Resumed conversation {args.chat_id} — {title}")
-    repl(c, init_title=data.get("title") or "")
+    repl(c, init_title=data.get("title") or "",
+         init_msgs=len(data.get("chat", {}).get("messages") or []))
 
 
 def _latest_chat_id():
@@ -2084,15 +2106,16 @@ def cmd_ds(args):
                 ch.get("id", "?"),
                 (ch.get("title") or "(untitled)")[:60],
                 datetime.fromtimestamp(int(ch.get("updated_at", 0)), timezone.utc).strftime("%Y-%m-%d %H:%M") if ch.get("updated_at") else "?",
+                _msgs_label(ch=ch),
                 ch.get("model", ""),
             ))
         if table:
-            for cid_, title, ts, model in rows:
-                table.add_row(cid_, title, ts, model)
+            for cid_, title, ts, label, model in rows:
+                table.add_row(cid_, title, ts, label, model)
             _console.print(table)
         else:
-            for cid_, title, ts, model in rows:
-                print(f"{cid_}  {title:50} {ts}  {model}")
+            for cid_, title, ts, label, model in rows:
+                print(f"{cid_}  {title:50} {ts}  {label}  {model}")
         _history_note(total, limited)
         c.close()
         return
@@ -2268,12 +2291,16 @@ def _esc(txt):
 
 
 def _repl_prompt(model, conv_title="", thinking=None, search=None,
-                 reasoning=None):
+                 reasoning=None, msgs=None):
     """Colored REPL prompt. Model in bold cyan, conversation title in dim
     yellow when active, plus full-state markers for the toggles the REPL uses:
     [think:on|off], [search:on|off] (DeepSeek) and [reason:auto|thinking|fast]
-    (Qwen). A toggle left as None (`thinking`/`search`) means "not applicable"
-    and renders no marker. Falls back to plain text when rich isn't available."""
+    (Qwen). `msgs` shows the conversation's message count as [N]. A toggle left
+    as None (`thinking`/`search`) means "not applicable" and renders no marker.
+    Falls back to plain text when rich isn't available."""
+    msgs_flag = ""
+    if msgs is not None:
+        msgs_flag = "[dim]{}[/dim]".format(_esc("[{}]".format(msgs)))
     flags = ""
     if thinking is not None:
         if thinking:
@@ -2291,9 +2318,11 @@ def _repl_prompt(model, conv_title="", thinking=None, search=None,
     if _RICH:
         title = "[yellow]{}[/yellow]".format(_esc(conv_title)) if conv_title else ""
         sep = "[dim]|[/dim]" if title else ""
-        return f"\n[bold cyan]{_esc(model)}[/bold cyan]{sep}{title}{flags} [bold]>[/bold] "
+        return f"\n[bold cyan]{_esc(model)}[/bold cyan]{sep}{title}{msgs_flag}{flags} [bold]>[/bold] "
     title = f"| {conv_title}" if conv_title else ""
     plain = f"{model}{title}"
+    if msgs is not None:
+        plain += "[{}]".format(msgs)
     if thinking is not None:
         plain += "[think:on]" if thinking else "[think:off]"
     if search is not None:
@@ -2333,7 +2362,8 @@ def ds_repl(c, args, init_title=""):
     multiline = False
     last_reply = ""
     while True:
-        prompt = _repl_prompt(c.model, conv_title, c.thinking, c.search)
+        prompt = _repl_prompt(c.model, conv_title, c.thinking, c.search,
+                              msgs=len(c.log))
         if multiline:
             user = _input_multiline(prompt).strip()
         else:
@@ -2460,15 +2490,16 @@ def ds_repl(c, args, init_title=""):
                         ch.get("id", "?"),
                         (ch.get("title") or "(untitled)")[:60],
                         datetime.fromtimestamp(int(ch.get("updated_at", 0)), timezone.utc).strftime("%Y-%m-%d %H:%M") if ch.get("updated_at") else "?",
+                        _msgs_label(ch=ch),
                         ch.get("model", ""),
                     ))
                 if table:
-                    for cid_, title, ts, model in rows:
-                        table.add_row(cid_, title, ts, model)
+                    for cid_, title, ts, label, model in rows:
+                        table.add_row(cid_, title, ts, label, model)
                     _console.print(table)
                 else:
-                    for cid_, title, ts, model in rows:
-                        print(f"{cid_}  {title:50} {ts}  {model}")
+                    for cid_, title, ts, label, model in rows:
+                        print(f"{cid_}  {title:50} {ts}  {label}  {model}")
                 _history_note(total, limited)
             elif cmd == "sync":
                 try:
@@ -2883,19 +2914,21 @@ def _run_cmd_feed(cmd, workspace=None, network=False,
     return "ok", (tag + "\n" + out).rstrip()
 
 
-def repl(client, init_title=""):
+def repl(client, init_title="", init_msgs=0):
     init_readline()
     title = f"Qwen Chat — {client.model}"
     cprint(Panel.fit(title, border_style="cyan"))
     dim("Type /help for commands, /exit to quit.")
     transcript: list[tuple[str, str]] = []
     conv_title = init_title
+    base_msgs = max(0, init_msgs)
     multiline = False
     last_reply = ""
 
     while True:
         prompt = _repl_prompt(client.model, conv_title,
-                              reasoning=getattr(client, "reasoning", "auto"))
+                              reasoning=getattr(client, "reasoning", "auto"),
+                              msgs=base_msgs + len(transcript))
         if multiline:
             user = _input_multiline(prompt).strip()
         else:
@@ -2952,6 +2985,7 @@ def repl(client, init_title=""):
             elif cmd == "new":
                 client.new_chat()
                 conv_title = ""
+                base_msgs = 0
                 okmsg(f"New conversation: {client._chat_id}")
             elif cmd == "status":
                 cmd_status(argparse.Namespace(), client)
@@ -2983,8 +3017,10 @@ def repl(client, init_title=""):
                 try:
                     data = client.use_chat(arg)
                     conv_title = data.get("title") or ""
+                    base_msgs = len(data.get("chat", {}).get("messages") or [])
                     client._parent_chat_id = None
                     okmsg(f"Resumed: {data.get('title') or '(untitled)'}")
+                    _print_conversation(data, False)
                 except QwenError as e:
                     emsg(str(e))
             elif cmd == "parent":
@@ -2996,6 +3032,7 @@ def repl(client, init_title=""):
                     data = client.use_chat(parent)
                     client._parent_chat_id = None
                     conv_title = data.get("title") or ""
+                    base_msgs = len(data.get("chat", {}).get("messages") or [])
                     okmsg(f"Back to parent: {data.get('title') or '(untitled)'}")
                 except QwenError as e:
                     emsg(str(e))
@@ -3799,7 +3836,8 @@ def main():
                     data = client.use_chat(last)
                     okmsg(f"Resumed last conversation {last} — "
                           f"{data.get('title') or '(untitled)'}")
-                    repl(client, init_title=data.get("title") or "")
+                    repl(client, init_title=data.get("title") or "",
+                          init_msgs=len(data.get("chat", {}).get("messages") or []))
                     return
                 except QwenError as e:
                     emsg(str(e))
